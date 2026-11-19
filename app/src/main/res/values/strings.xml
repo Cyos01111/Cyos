@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CyosPlay</string>
+    <string name="app_version">1.07rv6</string>
+    <string name="app_description">CyosPlay 1.07rv6</string>
+    <string name="about_us_title">About Us</string>
+    <string name="about_us_description">CyosPlay 1.07rv6</string>
+    <string name="hold_options_title">Media Actions</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_move">Move</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_move_to_vault">Move to Private Vault</string>
+    <string name="action_shred_permanently">Zero-Trace Shred</string>
+    <string name="battery_saver_mode">Battery Smoothness Shield</string>
+    <string name="stealth_playback_mode">Stealth Playback Privacy</string>
+</resources>

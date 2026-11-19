@@ -1,0 +1,211 @@
+VIDEO FORMAT & STREAM SPECIFICATION REPORT
+========================================================================
+
+1. GENERAL / CONTAINER FORMAT
+------------------------------------------------------------------------
+Complete Name                : [RTI] Classic Doraemon E09 in Hindi.mp4
+File Extension               : .mp4 (Mismatched extension; actual container is Matroska/.mkv)
+Actual Container Format      : Matroska / WebM (format_name: matroska,webm)
+Writing Application          : mkvmerge v56.1.0 ('My Friend') 64-bit
+Writing Library              : libebml v1.4.2 + libmatroska v1.6.4
+Encoded Date (UTC)           : 2022-08-09 05:01:20
+File Size                    : 53,140,533 bytes (50.68 MiB)
+Duration                     : 00:06:15.480 (375.480 seconds)
+Overall Bitrate              : 1,132,215 bps (1,132 kbps)
+Number of Streams            : 2 (1 Video stream, 1 Audio stream)
+Start Time                   : 0.000000 s
+Probe Score                  : 100
+
+
+2. VIDEO STREAM FORMAT (Stream #0:0)
+------------------------------------------------------------------------
+Stream Index                 : 0
+Codec Name                   : mpeg4
+Codec Long Name              : MPEG-4 part 2
+Codec Profile                : Advanced Simple Profile (Level 5)
+Codec Tag String / FourCC    : XVID (0x44495658)
+Width                        : 704 pixels
+Height                       : 396 pixels
+Coded Width x Height         : 704 x 396
+Sample Aspect Ratio (SAR)    : 396:563
+Display Aspect Ratio (DAR)   : 704:563 (approx. 1.25:1 / 5:4)
+Pixel Format                 : yuv420p (8-bit planar YUV 4:2:0)
+Chroma Subsampling Location  : left
+Frame Rate                   : 25.000 fps (25/1)
+Time Base                    : 1/1000
+Duration                     : 00:06:15.480 (375,480 ms)
+Bitrate                      : 969,171 bps (969.2 kbps)
+Frame Count                  : 9,387 frames
+Stream Size                  : 45,488,083 bytes (43.38 MiB / 85.6% of file)
+B-Frames                     : 1 (Packed B-frames present; DivX packed: false)
+Quarter Sample (QPel)        : false
+Reference Frames             : 1
+Extradata Size               : 58 bytes
+Default Track Flag           : 1 (Yes)
+
+
+3. AUDIO STREAM FORMAT (Stream #0:1)
+------------------------------------------------------------------------
+Stream Index                 : 1
+Codec Name                   : aac
+Codec Long Name              : AAC (Advanced Audio Coding)
+Codec Profile                : LC (Low Complexity)
+Codec Tag                    : 0x0000 ([0][0][0][0])
+Sample Format                : fltp (32-bit floating-point planar)
+Sample Rate                  : 44,100 Hz (44.1 kHz)
+Channels                     : 2 channels
+Channel Layout               : stereo
+Time Base                    : 1/1000
+Duration                     : 00:06:15.443
+Bitrate                      : 160,788 bps (160.8 kbps)
+Frame Count                  : 16,169 frames
+Stream Size                  : 7,545,878 bytes (7.20 MiB / 14.2% of file)
+Extradata Size               : 5 bytes
+Default Track Flag           : 1 (Yes)
+
+
+4. PLAYER COMPATIBILITY & RECOMMENDED TARGET FORMAT
+------------------------------------------------------------------------
+Root Cause of Playback Failure:
+- Container Mismatch: The file uses a Matroska (.mkv) EBML header but is named with a .mp4 extension.
+- Legacy Video Codec: The video track is encoded in MPEG-4 Part 2 (XVID) with packed B-frames rather than H.264 (AVC).
+
+Recommended Universal Format Target:
+- Container                  : MP4 (ISO Base Media File Format, -movflags +faststart)
+- Video Codec                : H.264 / AVC (libx264, High@L3.0, yuv420p)
+- Audio Codec                : AAC LC, 44,100 Hz, Stereo (stream copy)
+
+FFmpeg Conversion Command:
+ffmpeg -i "[RTI] Classic Doraemon E09 in Hindi.mp4" -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -c:a copy -movflags +faststart Classic_Doraemon_E09_Hindi_Compatible.mp4
+
+
+5. RAW FFPROBE JSON FORMAT OUTPUT
+------------------------------------------------------------------------
+{
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "mpeg4",
+            "codec_long_name": "MPEG-4 part 2",
+            "profile": "Advanced Simple Profile",
+            "codec_type": "video",
+            "codec_tag_string": "XVID",
+            "codec_tag": "0x44495658",
+            "width": 704,
+            "height": 396,
+            "coded_width": 704,
+            "coded_height": 396,
+            "closed_captions": 0,
+            "film_grain": 0,
+            "has_b_frames": 1,
+            "sample_aspect_ratio": "396:563",
+            "display_aspect_ratio": "704:563",
+            "pix_fmt": "yuv420p",
+            "level": 5,
+            "chroma_location": "left",
+            "refs": 1,
+            "quarter_sample": "false",
+            "divx_packed": "false",
+            "r_frame_rate": "25/1",
+            "avg_frame_rate": "25/1",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "duration_ts": 375480,
+            "duration": "375.480000",
+            "extradata_size": 58,
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0
+            },
+            "tags": {
+                "BPS": "969171",
+                "DURATION": "00:06:15.480000000",
+                "NUMBER_OF_FRAMES": "9387",
+                "NUMBER_OF_BYTES": "45488083",
+                "_STATISTICS_WRITING_APP": "mkvmerge v56.1.0 ('My Friend') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2022-08-09 05:01:20",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 1,
+            "codec_name": "aac",
+            "codec_long_name": "AAC (Advanced Audio Coding)",
+            "profile": "LC",
+            "codec_type": "audio",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "sample_fmt": "fltp",
+            "sample_rate": "44100",
+            "channels": 2,
+            "channel_layout": "stereo",
+            "bits_per_sample": 0,
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "extradata_size": 5,
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0
+            },
+            "tags": {
+                "BPS": "160788",
+                "DURATION": "00:06:15.443000000",
+                "NUMBER_OF_FRAMES": "16169",
+                "NUMBER_OF_BYTES": "7545878",
+                "_STATISTICS_WRITING_APP": "mkvmerge v56.1.0 ('My Friend') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2022-08-09 05:01:20",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        }
+    ],
+    "format": {
+        "filename": "[RTI] Classic Doraemon E09 in Hindi.mp4",
+        "nb_streams": 2,
+        "nb_programs": 0,
+        "format_name": "matroska,webm",
+        "format_long_name": "Matroska / WebM",
+        "start_time": "0.000000",
+        "duration": "375.480000",
+        "size": "53140533",
+        "bit_rate": "1132215",
+        "probe_score": 100,
+        "tags": {
+            "encoder": "libebml v1.4.2 + libmatroska v1.6.4",
+            "creation_time": "2022-08-09T05:01:20.000000Z"
+        }
+    }
+}
