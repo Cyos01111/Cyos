@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -573,16 +574,56 @@ fun VideoPlayerScreen(
         }
     }
 
-    // Downmix & Pre-Amp Audio Processor
-    val downmixProcessor = remember {
-        Eac3DownmixAudioProcessor().apply {
-            volumeBoostMultiplier = uiState.volumeBoostMultiplier
-            nightModeCompressionEnabled = uiState.nightModeAudioEnabled || uiState.nightModeEnabled
-            dialogueEnhancerEnabled = uiState.dialogueEnhancerEnabled
-        }
+    val memoryBudget = remember(uiState.lowRamShieldEnabled, uiState.batterySaverModeEnabled) {
+        uiState.memoryBudget ?: MemoryManager.detectMemoryBudget(
+            context = context,
+            forceLowRamMode = uiState.lowRamShieldEnabled,
+            batterySaverEnabled = uiState.batterySaverModeEnabled
+        )
     }
 
+    val playerSession = remember(
+        uiState.decoderEngineMode,
+        uiState.forceHardwareAccelerationHighBitrate,
+        uiState.lowRamShieldEnabled,
+        memoryBudget.tier,
+        memoryBudget.batterySaverActive
+    ) {
+        val preferSw = (uiState.decoderEngineMode == DecoderEngineMode.SW ||
+            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
+            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE) &&
+            !uiState.forceHardwareAccelerationHighBitrate
+
+        val isSwEngine = uiState.decoderEngineMode == DecoderEngineMode.SW ||
+            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
+            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE
+
+        val codecSelector = com.cyosplay.player.createXvidAwareMediaCodecSelector(
+            fallbackSelector = AudioBadgeFormatter.createMultiCodecSelectorForEngine(
+                decoderEngineMode = uiState.decoderEngineMode,
+                forceHardwareForHighBitrate = uiState.forceHardwareAccelerationHighBitrate
+            ),
+            preferSoftwareForAllCodecs = isSwEngine
+        )
+        val extMode = if (uiState.decoderEngineMode == DecoderEngineMode.HW && !preferSw) {
+            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+        } else {
+            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+        }
+        val codecProfileKey = "${uiState.decoderEngineMode.name}:${uiState.forceHardwareAccelerationHighBitrate}:${uiState.lowRamShieldEnabled}"
+        com.cyos.player.CyosPlayerHolder.getOrCreateSession(
+            context = context,
+            mediaCodecSelector = codecSelector,
+            extensionRendererMode = extMode,
+            codecProfileKey = codecProfileKey,
+            subtitlesEnabledByUser = uiState.subtitlesEnabledByUser,
+            forceLowRamMode = uiState.lowRamShieldEnabled
+        )
+    }
+
+    val downmixProcessor = playerSession.downmixAudioProcessor
     LaunchedEffect(
+        downmixProcessor,
         uiState.volumeBoostMultiplier,
         uiState.nightModeAudioEnabled,
         uiState.nightModeEnabled,
@@ -618,71 +659,22 @@ fun VideoPlayerScreen(
         )
     }
 
-    val memoryBudget = remember(uiState.lowRamShieldEnabled, uiState.batterySaverModeEnabled) {
-        uiState.memoryBudget ?: MemoryManager.detectMemoryBudget(
-            context = context,
-            forceLowRamMode = uiState.lowRamShieldEnabled,
-            batterySaverEnabled = uiState.batterySaverModeEnabled
-        )
-    }
+    val preloadManager = playerSession.preloadManager
+    val preloadStatusControl = playerSession.statusControl
 
-    val fastPlayerManager = remember(
-        uiState.decoderEngineMode,
-        uiState.forceHardwareAccelerationHighBitrate,
-        memoryBudget.tier,
-        memoryBudget.batterySaverActive
-    ) {
-        val preferSw = (uiState.decoderEngineMode == DecoderEngineMode.SW ||
-            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
-            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE) &&
-            !uiState.forceHardwareAccelerationHighBitrate
-
-        val isSwEngine = uiState.decoderEngineMode == DecoderEngineMode.SW ||
-            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
-            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE
-
-        val codecSelector = com.cyosplay.player.createXvidAwareMediaCodecSelector(
-            fallbackSelector = AudioBadgeFormatter.createMultiCodecSelectorForEngine(
-                decoderEngineMode = uiState.decoderEngineMode,
-                forceHardwareForHighBitrate = uiState.forceHardwareAccelerationHighBitrate
-            ),
-            preferSoftwareForAllCodecs = isSwEngine
-        )
-
-        val loadControl = com.cyos.player.CyosFastPlayerManager.buildOptimizedLoadControl(
-            chunkSizeBytes = memoryBudget.chunkSizeBytes,
-            targetBufferBytes = memoryBudget.targetBufferBytes,
-            minBufferMs = memoryBudget.minBufferMs,
-            maxBufferMs = memoryBudget.maxBufferMs,
-            bufferForPlaybackMs = minOf(memoryBudget.bufferForPlaybackMs, 350),
-            bufferForPlaybackAfterRebufferMs = minOf(memoryBudget.bufferForPlaybackAfterRebufferMs, 1_000),
-            backBufferDurationMs = maxOf(memoryBudget.backBufferDurationMs, 15_000),
-            retainBackBufferFromKeyframe = true,
-            prioritizeTimeOverSizeThresholds = true
-        )
-
-        com.cyos.player.CyosFastPlayerManager(
-            context = context,
-            customAudioProcessors = arrayOf(downmixProcessor),
-            mediaCodecSelector = codecSelector,
-            extensionRendererMode = if (uiState.decoderEngineMode == DecoderEngineMode.HW && !preferSw) {
-                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-            } else {
-                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
-            },
-            loadControlOverride = loadControl,
-            subtitlesEnabledByUser = uiState.subtitlesEnabledByUser
-        )
-    }
-
-    LaunchedEffect(fastPlayerManager, playlistQueue) {
+    LaunchedEffect(playerSession, playlistQueue) {
         if (playlistQueue.isNotEmpty()) {
-            fastPlayerManager.submitPlaylist(playlistQueue.map { MediaItem.fromUri(it.uri) })
+            val items = playlistQueue.map { MediaItem.fromUri(it.uri) }
+            preloadManager.reset()
+            items.forEachIndexed { idx, mediaItem ->
+                preloadManager.add(mediaItem, idx)
+            }
+            preloadManager.invalidate()
         }
     }
 
-    val exoPlayer = remember(fastPlayerManager) {
-        fastPlayerManager.player.apply {
+    val exoPlayer = remember(playerSession) {
+        playerSession.player.apply {
                 videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                 addListener(object : Player.Listener {
                     override fun onPlayerError(error: PlaybackException) {
@@ -919,33 +911,34 @@ fun VideoPlayerScreen(
             }
     }
 
-    LaunchedEffect(activeVideo.uri, fastPlayerManager) {
+    LaunchedEffect(activeVideo.uri, playerSession) {
         viewModel.discoverSidecarSubtitlesForVideo(activeVideo)
-        // Detach and re-attach surface before loading the next item to prevent MediaCodec.configure()
-        // surface disconnect issues when switching between software-decoded (XVID/FFmpeg) and hardware-decoded videos
-        activePlayerViewRef?.let { pv ->
-            if (pv.player === exoPlayer) {
-                pv.player = null
-                pv.player = exoPlayer
+        val queueIndex = playlistQueue.indexOfFirst { it.path == activeVideo.path }.coerceAtLeast(0)
+        preloadStatusControl.currentPlayingIndex = queueIndex
+        preloadManager.setCurrentPlayingIndex(queueIndex)
+        preloadManager.invalidate()
+
+        val alreadyPreparedOnTap = com.cyos.player.CyosPlayerHolder.consumeMatchingPrePreparedUri(activeVideo.uri)
+        if (alreadyPreparedOnTap) {
+            com.cyos.player.CyosFastPlayer.applyBitratePolicyForUri(exoPlayer, activeVideo.uri)
+            exoPlayer.playWhenReady = isPlaying
+        } else {
+            // Detach and re-attach surface before loading the next item to prevent MediaCodec.configure()
+            // surface disconnect issues when switching between software-decoded (XVID/FFmpeg) and hardware-decoded videos
+            activePlayerViewRef?.let { pv ->
+                if (pv.player === exoPlayer) {
+                    pv.player = null
+                    pv.player = exoPlayer
+                }
             }
-        }
-        val queueIndex = playlistQueue.indexOfFirst { it.path == activeVideo.path }
-        val startPos = if (currentPositionMs > 0L && !uiState.stealthPlaybackEnabled) currentPositionMs else 0L
-        if (queueIndex >= 0 && fastPlayerManager.getCurrentPlaylistSize() == playlistQueue.size) {
-            fastPlayerManager.playAtIndex(
-                index = queueIndex,
-                startPositionMs = startPos,
+            val startPos = if (currentPositionMs > 0L && !uiState.stealthPlaybackEnabled) currentPositionMs else 0L
+            com.cyos.player.CyosFastPlayer.playOnTap(
+                player = exoPlayer,
+                preloadManager = preloadManager,
+                mediaItem = MediaItem.fromUri(activeVideo.uri),
+                resumeMs = startPos,
                 autoPlay = isPlaying
             )
-        } else {
-            val item = MediaItem.fromUri(activeVideo.uri)
-            if (startPos > 0L) {
-                exoPlayer.setMediaItem(item, startPos)
-            } else {
-                exoPlayer.setMediaItem(item)
-            }
-            exoPlayer.prepare()
-            exoPlayer.playWhenReady = isPlaying
         }
         if (!uiState.stealthPlaybackEnabled) {
             viewModel.settingsRepository.saveLastPlayedVideoForFolder(activeVideo.folderId, activeVideo.path)
@@ -1018,10 +1011,12 @@ fun VideoPlayerScreen(
         } else {
             uiState.playbackSpeed.coerceIn(0.25f, 5.0f)
         }
-        exoPlayer.setPlaybackSpeed(effectiveSpeed)
+        if (PlayerGestureControlHelper.shouldDispatchPlaybackSpeedChange(exoPlayer.playbackParameters.speed, effectiveSpeed)) {
+            exoPlayer.setPlaybackSpeed(effectiveSpeed)
+        }
     }
 
-    // CPU-optimized position & checkpoint loop (Items 22 & 23: pauses when video is paused; throttles when controls hidden)
+    // CPU-optimized position & checkpoint loop (pauses when video is paused; throttles during gestures or hidden controls)
     LaunchedEffect(
         exoPlayer,
         isPlaying,
@@ -1035,20 +1030,28 @@ fun VideoPlayerScreen(
     ) {
         var lastCheckpointSavedMs = System.currentTimeMillis()
         while (isPlaying) {
+            val isGestureBusy = isScreenTouchSlideSkipping ||
+                isHold2xSpeedActive ||
+                activeGestureLock != PlayerGestureLock.NONE
             val dur = exoPlayer.duration
-            if (dur > 0L) {
+            if (dur > 0L && dur != totalDurationMs) {
                 totalDurationMs = dur
             }
             if (!isUserScrubbing && activeGestureLock != PlayerGestureLock.PINCH_ZOOM) {
                 val pos = exoPlayer.currentPosition
-                if (pos >= 0L && kotlin.math.abs(pos - currentPositionMs) >= 150L) {
+                if (pos >= 0L && kotlin.math.abs(pos - currentPositionMs) >= 180L) {
                     currentPositionMs = pos
                 }
             }
 
-            // Periodic 3-second Last-Resume checkpoint (skipped in Stealth Playback - Item 5)
+            // Periodic 4-second Last-Resume checkpoint (skipped during active gestures, scrubbing, or Stealth Playback)
             val now = System.currentTimeMillis()
-            if (!uiState.stealthPlaybackEnabled && now - lastCheckpointSavedMs >= 3000L && currentPositionMs > 0L) {
+            if (!uiState.stealthPlaybackEnabled &&
+                !isGestureBusy &&
+                !isUserScrubbing &&
+                now - lastCheckpointSavedMs >= 4000L &&
+                currentPositionMs > 0L
+            ) {
                 viewModel.savePlaybackProgress(activeVideo.path, currentPositionMs, totalDurationMs)
                 lastCheckpointSavedMs = now
             }
@@ -1063,13 +1066,12 @@ fun VideoPlayerScreen(
 
             val hasActiveSubtitles = uiState.subtitlesEnabledByUser && uiState.externalSubtitleCues.isNotEmpty()
             val hasAbLoop = uiState.abRepeatStartMs != null && uiState.abRepeatEndMs != null
-            val isGestureBusy = isScreenTouchSlideSkipping || activeGestureLock != PlayerGestureLock.NONE
             val pollDelayMs = when {
-                isGestureBusy -> 1000L
-                uiState.batterySaverModeEnabled -> 500L // Battery Smoothness Shield power saving
-                controlsVisible && !uiState.isControlsLocked -> minOf(320L, memoryBudget.positionPollingIntervalMs)
+                isGestureBusy -> 1200L
+                uiState.batterySaverModeEnabled -> 550L // Battery Smoothness Shield power saving
+                controlsVisible && !uiState.isControlsLocked -> minOf(350L, memoryBudget.positionPollingIntervalMs)
                 hasActiveSubtitles || hasAbLoop -> 420L
-                else -> maxOf(1600L, memoryBudget.positionPollingIntervalMs)
+                else -> maxOf(1800L, memoryBudget.positionPollingIntervalMs)
             }
             delay(pollDelayMs)
         }
@@ -1092,7 +1094,7 @@ fun VideoPlayerScreen(
         }
     }
 
-    DisposableEffect(fastPlayerManager, uiState.stealthPlaybackEnabled) {
+    DisposableEffect(playerSession, uiState.stealthPlaybackEnabled) {
         viewModel.registerActiveExoPlayer(exoPlayer)
         com.cyos.player.CyosPlayerMediaStoreDeleter.activeExoPlayerInstance = exoPlayer
         onDispose {
@@ -1105,7 +1107,18 @@ fun VideoPlayerScreen(
                 val finalDur = exoPlayer.duration.takeIf { it > 0L } ?: totalDurationMs
                 viewModel.savePlaybackProgress(activeVideo.path, finalPos, finalDur)
             }
-            fastPlayerManager.release()
+            if (playerSession.isPooled) {
+                com.cyos.player.CyosPlayerHolder.pauseAndDetachIfPooled()
+            } else {
+                try {
+                    preloadManager.release()
+                } catch (_: Throwable) {
+                }
+                try {
+                    exoPlayer.release()
+                } catch (_: Throwable) {
+                }
+            }
         }
     }
 
@@ -1296,7 +1309,10 @@ fun VideoPlayerScreen(
             // volume, brightness, horizontal skipping, and hold-skip never get intercepted.
             .pointerInput(uiState.isControlsLocked) {
                 var lastZoomHudElapsedMs = 0L
+                var holdSlideAnchorX: Float? = null
+                var holdSlideAnchorSpeed = 2.0f
                 awaitEachGesture {
+                    holdSlideAnchorX = null
                     do {
                         val event = awaitPointerEvent()
                         val pressedCount = event.changes.count { it.pressed }
@@ -1308,7 +1324,29 @@ fun VideoPlayerScreen(
                             if (activeGestureLock != PlayerGestureLock.VERTICAL_VOLUME) {
                                 preGestureVolumeSnapshot = gestureVolumeFraction
                             }
+                            if (isHold2xSpeedActive || activeGestureLock == PlayerGestureLock.HOLD_FAST_FORWARD) {
+                                val activePointer = event.changes.firstOrNull { it.pressed }
+                                if (activePointer != null) {
+                                    val anchorX = holdSlideAnchorX ?: activePointer.position.x.also {
+                                        holdSlideAnchorX = it
+                                        holdSlideAnchorSpeed = holdSpeedMultiplier
+                                    }
+                                    val dx = activePointer.position.x - anchorX
+                                    val stepWidthPx = (size.width / 5f).coerceAtLeast(48f)
+                                    val stepDelta = (dx / stepWidthPx).roundToInt()
+                                    val targetSpeed = (holdSlideAnchorSpeed + stepDelta)
+                                        .coerceIn(1.0f, 5.0f)
+                                        .roundToInt()
+                                        .toFloat()
+                                    if (targetSpeed != holdSpeedMultiplier) {
+                                        holdSpeedMultiplier = targetSpeed
+                                    }
+                                }
+                            } else {
+                                holdSlideAnchorX = null
+                            }
                         } else if (pressedCount >= 2 && !uiState.isControlsLocked) {
+                            holdSlideAnchorX = null
                             lastMultiTouchEndedElapsedMs = SystemClock.elapsedRealtime()
                             if (activeGestureLock != PlayerGestureLock.PINCH_ZOOM) {
                                 activeGestureLock = PlayerGestureLock.PINCH_ZOOM
@@ -1386,6 +1424,7 @@ fun VideoPlayerScreen(
                                 }
                             }
                         } else if (pressedCount == 0) {
+                            holdSlideAnchorX = null
                             if (activeGestureLock == PlayerGestureLock.PINCH_ZOOM) {
                                 lastMultiTouchEndedElapsedMs = SystemClock.elapsedRealtime()
                                 screenBrightness = PlayerGestureControlHelper.resolveBrightnessDuringZoomOrMultiTouch(
@@ -1425,11 +1464,16 @@ fun VideoPlayerScreen(
                         try {
                             tryAwaitRelease()
                         } finally {
-                            if (isHold2xSpeedActive) {
-                                isHold2xSpeedActive = false
-                            }
-                            if (activeGestureLock == PlayerGestureLock.HOLD_FAST_FORWARD) {
-                                activeGestureLock = PlayerGestureLock.NONE
+                            // Only reset hold-skip here if all fingers have actually lifted;
+                            // if tryAwaitRelease() was cancelled by horizontal drag consumption
+                            // while the finger is still held down, keep hold-skip active until release.
+                            if (activePointerCount <= 0) {
+                                if (isHold2xSpeedActive) {
+                                    isHold2xSpeedActive = false
+                                }
+                                if (activeGestureLock == PlayerGestureLock.HOLD_FAST_FORWARD) {
+                                    activeGestureLock = PlayerGestureLock.NONE
+                                }
                             }
                         }
                     },
@@ -1447,7 +1491,8 @@ fun VideoPlayerScreen(
                             isHorizontalSeekingActive = isScreenTouchSlideSkipping ||
                                 activeGestureLock == PlayerGestureLock.HORIZONTAL_SKIP,
                             recentlyPinched = recentlyPinched,
-                            isDoubleTapSkipActive = recentlyDoubleTapped
+                            isDoubleTapSkipActive = recentlyDoubleTapped,
+                            allowWhenLocked = true
                         )
                         if (canHoldSpeed && activeGestureLock == PlayerGestureLock.NONE) {
                             registerUserInteraction()
@@ -1682,20 +1727,26 @@ fun VideoPlayerScreen(
 
                         if (isHold2xSpeedActive || lockedGesture == PlayerGestureLock.HOLD_FAST_FORWARD || activeGestureLock == PlayerGestureLock.HOLD_FAST_FORWARD) {
                             // Hold + slide horizontally controls x1..x5 speed ONLY (never triggers seek skipping, volume, or brightness)
-                            lockedGesture = PlayerGestureLock.HOLD_FAST_FORWARD
+                            if (lockedGesture != PlayerGestureLock.HOLD_FAST_FORWARD) {
+                                lockedGesture = PlayerGestureLock.HOLD_FAST_FORWARD
+                                startHoldSpeed = holdSpeedMultiplier
+                                totalDx = 0f
+                            }
                             activeGestureLock = PlayerGestureLock.HOLD_FAST_FORWARD
-                            registerUserInteraction()
                             change.consume()
                             isScreenTouchSlideSkipping = false
                             screenBrightness = dragStartBrightnessSnapshot
                             gestureVolumeFraction = dragStartVolumeSnapshot
                             totalDx += dragAmount.x
-                            val stepWidthPx = (size.width / 5f).coerceAtLeast(48f)
-                            val stepDelta = (totalDx / stepWidthPx).roundToInt()
-                            val targetSpeed = (startHoldSpeed + stepDelta).coerceIn(1.0f, 5.0f).roundToInt().toFloat()
+                            val targetSpeed = PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                                startHoldSpeed = startHoldSpeed,
+                                totalDxPx = totalDx,
+                                containerWidthPx = size.width.toFloat(),
+                                currentHoldSpeed = holdSpeedMultiplier
+                            )
                             if (targetSpeed != holdSpeedMultiplier) {
+                                registerUserInteraction()
                                 holdSpeedMultiplier = targetSpeed
-                                viewModel.setPlaybackSpeed(targetSpeed)
                             }
                             return@detectDragGestures
                         }
@@ -2376,38 +2427,54 @@ fun VideoPlayerScreen(
             }
         }
 
-        // Hold Speed indicator only when unlocked (no icon while skipping)
+        // Compact floating Hold-Skip speed pill (visible while holding in both locked & unlocked modes)
         AnimatedVisibility(
-            visible = isHold2xSpeedActive && !uiState.isControlsLocked && !uiState.isInPipMode,
-            enter = fadeIn(),
-            exit = fadeOut(),
+            visible = isHold2xSpeedActive && !uiState.isInPipMode,
+            enter = fadeIn(animationSpec = tween(durationMillis = 140)),
+            exit = fadeOut(animationSpec = tween(durationMillis = 180)),
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 28.dp)
+                .statusBarsPadding()
+                .padding(top = 12.dp)
         ) {
             Surface(
-                color = Color(0x990A0E17),
+                color = Color(0xB30A0E17),
                 shape = RoundedCornerShape(50),
                 modifier = Modifier
-                    .border(1.dp, AmberGold.copy(alpha = 0.7f), RoundedCornerShape(50))
+                    .border(1.dp, AmberGold.copy(alpha = 0.72f), RoundedCornerShape(50))
                     .testTag("player_hold_2x_speed_pill")
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 7.dp),
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     val activeHoldInt = holdSpeedMultiplier.roundToInt().coerceIn(1, 5)
                     Text(
-                        text = "${activeHoldInt}.0x Speed",
+                        text = "${activeHoldInt}.0x",
                         style = MaterialTheme.typography.labelLarge.copy(
                             fontFamily = RobotoNumbersFontFamily
                         ),
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         (1..5).forEach { step ->
+                            val stepModifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .let { base ->
+                                    if (!uiState.isControlsLocked) {
+                                        base.clickable {
+                                            registerUserInteraction()
+                                            holdSpeedMultiplier = step.toFloat()
+                                            viewModel.setPlaybackSpeed(step.toFloat())
+                                        }
+                                    } else {
+                                        base
+                                    }
+                                }
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                .testTag("hold_speed_step_x$step")
                             Text(
                                 text = "x$step",
                                 style = MaterialTheme.typography.labelSmall.copy(
@@ -2415,15 +2482,7 @@ fun VideoPlayerScreen(
                                 ),
                                 fontWeight = if (step == activeHoldInt) FontWeight.ExtraBold else FontWeight.Normal,
                                 color = if (step == activeHoldInt) AmberGold else Color.White.copy(alpha = 0.55f),
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable {
-                                        registerUserInteraction()
-                                        holdSpeedMultiplier = step.toFloat()
-                                        viewModel.setPlaybackSpeed(step.toFloat())
-                                    }
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                                    .testTag("hold_speed_step_x$step")
+                                modifier = stepModifier
                             )
                         }
                     }

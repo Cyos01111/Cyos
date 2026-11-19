@@ -15,6 +15,7 @@
     <uses-permission android:name="android.permission.USE_FINGERPRINT" />
 
     <application
+        android:name="com.cyosplay.player.CyosPlayApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -62,6 +63,14 @@
             android:name="com.cyosplay.player.MainActivity"
             android:exported="true"
             android:targetActivity="com.cyosplay.player.cyosplay" />
+        <activity
+            android:name="com.google.android.gms.oss.licenses.OssLicensesMenuActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar" />
+        <activity
+            android:name="com.google.android.gms.oss.licenses.OssLicensesActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AppCompat.DayNight.DarkActionBar" />
     </application>
 
 </manifest>

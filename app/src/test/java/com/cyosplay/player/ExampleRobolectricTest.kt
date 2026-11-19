@@ -157,7 +157,7 @@ class ExampleRobolectricTest {
     @Test
     fun playerRotationLockAudioSelectionAndLowRamControls_workCorrectly() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
 
         viewModel.setLowRamShieldEnabled(true)
         viewModel.setBatterySaverModeEnabled(true)
@@ -454,9 +454,9 @@ class ExampleRobolectricTest {
     fun large1000GbTransfer_streamingBuffer_hiddenDebugAndZeroKnowledgeText_andCyosPlay102cDescription() {
         val viewModel = VideoPlayerViewModel(context)
 
-        // 1. Verify CyosPlay 1.06rv8 branding & simplified description
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        // 1. Verify CyosPlay 1.07rv8 branding & simplified description
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 2. Verify Debug Mode and Zero-Knowledge technical text are hidden silently
         CryptoSecurityManager.enforcePermanentNonDebugMode(context)
@@ -1180,8 +1180,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify APK Version 1.06rv8
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 2. Verify Last Playback Position Saving, Auto-Resume on Reopen, and Start Over Reset
         viewModel.setStealthPlaybackEnabled(false)
@@ -1358,8 +1358,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.06rv8 & default mobile system font mode
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertEquals(com.cyosplay.player.data.model.AppFontMode.SYSTEM_DEFAULT, viewModel.uiState.value.fontMode)
 
         // 2. Verify Subtitles and Smart Enhanced Video do NOT automatically turn ON until user enables them
@@ -1582,8 +1582,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv2_matroskaWebm495x396EncodingSwAspAacLc_perVideoAndFolderBrightnessVolume_vaultAutoLock10s_andMediaStoreHelper() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 1. Verify 495x396 and 1920x800 Matroska/WebM, Encoding SW, libebml v14.2 + libmatroska v1.6.4, Video Codec MPEG-4 part 2, ASP, AAC, LC, and 44100 HZ
         val matroska495x396 = VideoItem(
@@ -1763,8 +1763,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv3_floatingMiniPlayer_44100HzSampleRate_1920x800And495x396_andNavigationWhilePlaying() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 1. Verify 1920x800 and 495x396 Matroska/WebM + 44100 HZ + MPEG-4 part 2 + ASP + AAC + LC
         val ultrawide1920x800 = VideoItem(
@@ -1855,8 +1855,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv4_hardwareAccelerationToggle_mediaInfoFfprobe_expandedResolutions_andMiniPlayerSeek() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 1. Verify all new Web/Stream and SD resolutions in VideoItem, Formatters, and FfmpegMatroskaCodecRegistry
         val expectedResolutions = listOf(
@@ -1970,8 +1970,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify CyosPlay 1.06rv11 Versioning & Description
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 2. Verify Force Hardware Acceleration and Battery Smoothness Shield both default to OFF until manually turned ON
         assertFalse(
@@ -2075,8 +2075,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify CyosPlay 1.06rv11 Versioning & Description
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
 
         // 2. Verify Unified Global Brightness & Volume Memory shared across all folders
         val folderA = "/storage/emulated/0/Anime120Fps"
@@ -2784,8 +2784,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv10_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Manual Subtitle Text Size Adjustment: + / - buttons (±2sp) and slider up to 56sp
@@ -2882,8 +2882,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv13_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. VideoPlayerFileMover normalizeVideoRelativePath & moveVideoFile verification
@@ -3002,8 +3002,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv14_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify moveVideoViaVideoPlayerFileMover releases active mini-player handle & updates folder lists immediately
@@ -3090,8 +3090,8 @@ class ExampleRobolectricTest {
     fun v106rv15_features_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify Large (24sp) and Transparent (75% opacity, no background box) subtitle defaults
@@ -3197,8 +3197,8 @@ class ExampleRobolectricTest {
     fun v106rv16_features_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify buildVideoContentUri & deleteVideoFromMediaStore helper
@@ -3329,8 +3329,8 @@ class ExampleRobolectricTest {
     fun v106rv17_permanentDelete_trueMove_sidecarSubtitles_andJarBuildPassword_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         val testRoot = File(context.cacheDir, "v106rv17_test_root").apply {
@@ -3531,8 +3531,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.06rv18 and zero debug/logs
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify Per-Video Audio Selection Memory (remember last audio track setting for each video)
@@ -3745,8 +3745,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv2 and zero debug/logs
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         val testRoot = File(context.cacheDir, "cyos_107rv_test_${System.currentTimeMillis()}").apply { mkdirs() }
@@ -3928,8 +3928,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv2 and zero debug/logs
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify XvidMatroskaExtractor csd-0 extraction (00 00 01 B0 F5 ... 00 00 01 20 ... up to 00 00 01 B6)
@@ -4096,8 +4096,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv3 and zero debug/logs
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify CyosPlayerMediaStoreDeleter (package com.cyos.player) deletes video + sidecar subtitles and releases ExoPlayer handle
@@ -4288,8 +4288,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv4 and zero debug/logs
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Fix a: Verify XvidSupportExtractorsFactory uses DefaultSubtitleParserFactory() (never UNSUPPORTED)
@@ -4401,8 +4401,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv5 and permanent non-debug mode
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify High Volume & Screen Brightness Warning Alert automatically resets to 50% (0.50f)
@@ -4521,8 +4521,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv6 and permanent non-debug mode
-        assertEquals("1.07rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.07rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify CyosMediaCache singleton & CacheDataSource.Factory
@@ -4673,6 +4673,389 @@ class ExampleRobolectricTest {
         assertEquals(
             "CYOSPLAY_1.07RV6_SIGNED_ENCRYPTED_BUILD_CODE",
             CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv6(context, encryptedBuild107rv6)
+        )
+    }
+
+    @Test
+    fun v107rv7_fastLoadControl_preloadHandoff_cacheWarmup_lockedHoldSkip_andJarPassword_verification() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = VideoPlayerViewModel(context)
+
+        // 1. Verify version 1.07rv8, CyosPlay 1.07rv8 description, and permanent non-debug mode
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
+        assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
+
+        // 2. Verify CyosCacheProvider shared 200 MiB singleton SimpleCache
+        com.cyos.player.CyosCacheProvider.warmUpAsync(context)
+        val cacheA = com.cyos.player.CyosCacheProvider.getOrCreate(context)
+        val cacheB = com.cyos.player.CyosMediaCache.getCache(context)
+        org.junit.Assert.assertSame("CyosCacheProvider & CyosMediaCache must share one SimpleCache", cacheA, cacheB)
+        assertEquals(200L * 1024L * 1024L, com.cyos.player.CyosCacheProvider.MAX_CACHE_BYTES)
+
+        // 3. Verify RAM-safe CyosFastPlayer LoadControl (600ms startup, 1500ms rebuffer, 15s back-buffer)
+        val loadControl = com.cyos.player.CyosFastPlayer.createLoadControl(context)
+        assertNotNull(loadControl)
+        val lowRamLoadControl = com.cyos.player.CyosFastPlayer.createLoadControl(context, forceLowRamMode = true)
+        assertNotNull(lowRamLoadControl)
+        val memBudget = com.cyosplay.player.util.MemoryManager.detectMemoryBudget(context)
+        assertEquals(600, memBudget.bufferForPlaybackMs)
+        assertEquals(1_500, memBudget.bufferForPlaybackAfterRebufferMs)
+        assertEquals(15_000, memBudget.backBufferDurationMs)
+
+        // 4. Verify CyosPreloadStatusControl strictly > 600ms startup & capped distance window
+        val statusControl = com.cyos.player.CyosPreloadStatusControl(currentPlayingIndex = 2, isLowRamDevice = false)
+        val nextStatus = statusControl.getTargetPreloadStatus(3) as androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status
+        assertEquals(
+            androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status.STAGE_LOADED_FOR_DURATION_MS,
+            nextStatus.stage
+        )
+        assertTrue("Next preload must exceed 600ms startup buffer", nextStatus.value >= 2_000L)
+        val prevStatus = statusControl.getTargetPreloadStatus(1) as androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status
+        assertEquals(1_000L, prevStatus.value)
+        val dist2Status = statusControl.getTargetPreloadStatus(4) as androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status
+        assertEquals(
+            androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status.STAGE_TRACKS_SELECTED,
+            dist2Status.stage
+        )
+        val dist4Status = statusControl.getTargetPreloadStatus(6) as androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status
+        assertEquals(
+            androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status.STAGE_SOURCE_PREPARED,
+            dist4Status.stage
+        )
+        org.junit.Assert.assertNull(statusControl.getTargetPreloadStatus(7))
+
+        // 5. Verify network 4Mbps startup bitrate cap vs local uncapped track selector
+        val netSelector = com.cyos.player.CyosFastPlayer.createTrackSelector(context, capNetworkStartupBitrate = true)
+        assertEquals(4_000_000, netSelector.parameters.maxVideoBitrate)
+        val localSelector = com.cyos.player.CyosFastPlayer.createTrackSelector(context, capNetworkStartupBitrate = false)
+        assertTrue(localSelector.parameters.maxVideoWidth >= 15360)
+
+        // 6. Verify CyosPlayerHolder pre-transition warm prepareOnTap & release
+        val tapItem = androidx.media3.common.MediaItem.fromUri("https://example.com/v107rv7.mp4")
+        val prepared = com.cyos.player.CyosPlayerHolder.prepareOnTap(
+            context = context,
+            mediaItem = tapItem,
+            playlist = listOf(tapItem),
+            currentIndex = 0,
+            resumeMs = 0L
+        )
+        assertTrue(prepared)
+        assertTrue(com.cyos.player.CyosPlayerHolder.consumeMatchingPrePreparedUri(android.net.Uri.parse("https://example.com/v107rv7.mp4")))
+        com.cyos.player.CyosPlayerHolder.release()
+
+        // 7. Verify locked-screen smooth hold skip (2x + slide tuning) & locked double-tap skip (±10s)
+        assertTrue(
+            "Hold skip must work smoothly when video player screen lock is enabled",
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = false,
+                activePointerCount = 1,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = false,
+                recentlyPinched = false,
+                allowWhenLocked = true
+            )
+        )
+        assertFalse(
+            "Locked hold skip must stay isolated from pinch-zoom",
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = false,
+                activePointerCount = 2,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = true,
+                recentlyPinched = true,
+                allowWhenLocked = true
+            )
+        )
+
+        // 8. Verify 1.07rv7 encrypted release keystore password & JAR/Build code encryption
+        val keystoreToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7Token(context)
+        assertEquals(
+            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7)
+        )
+        val jarBuildToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7Token(context)
+        assertEquals(
+            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7)
+        )
+        val encryptedBuild107rv7 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7(
+            context,
+            "CYOSPLAY_1.07RV7_SIGNED_ENCRYPTED_BUILD_CODE"
+        )
+        assertEquals(
+            "CYOSPLAY_1.07RV7_SIGNED_ENCRYPTED_BUILD_CODE",
+            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv7(context, encryptedBuild107rv7)
+        )
+
+        // 9. Verify 1.07rv8 CyosSmartDataSourceFactory, DefaultPreloadManager.Status helpers, and V107RV8 password encryption
+        val smartFactory = com.cyos.player.CyosSmartDataSourceFactory(context)
+        assertNotNull(smartFactory.createDataSource())
+        val preloadBuilder = com.cyos.player.CyosFastPlayer.createPreloadBuilder(
+            context = context,
+            statusControl = com.cyos.player.CyosPreloadStatusControl(currentPlayingIndex = 0)
+        )
+        assertNotNull(preloadBuilder)
+        assertEquals(
+            2_000L,
+            com.cyos.player.CyosPreloadStatusControl.specifiedRangeLoaded(2_000L).value
+        )
+        assertEquals(
+            androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status.STAGE_TRACKS_SELECTED,
+            com.cyos.player.CyosPreloadStatusControl.TRACKS_SELECTED.stage
+        )
+        assertEquals(
+            androidx.media3.exoplayer.source.preload.DefaultPreloadManager.Status.STAGE_SOURCE_PREPARED,
+            com.cyos.player.CyosPreloadStatusControl.SOURCE_PREPARED.stage
+        )
+
+        val keystoreToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv8Token(context)
+        assertEquals(
+            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv8)
+        )
+        val jarBuildToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv8Token(context)
+        assertEquals(
+            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv8)
+        )
+        val encryptedBuild107rv8 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv8(
+            context,
+            "CYOSPLAY_1.07RV8_SIGNED_ENCRYPTED_BUILD_CODE"
+        )
+        assertEquals(
+            "CYOSPLAY_1.07RV8_SIGNED_ENCRYPTED_BUILD_CODE",
+            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv8(context, encryptedBuild107rv8)
+        )
+    }
+
+    @Test
+    fun v107rv7a_lockedHoldSkip_speedStepping_aboutUsCreator_formatEfficiency_andJarEncryption_verification() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = VideoPlayerViewModel(context)
+
+        // 1. Verify 1.07rv7a branding, About Us "Created by Tkm", and permanent non-debug mode
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
+        assertEquals("Created by Tkm", viewModel.uiState.value.aboutUsCreator)
+        assertEquals("CyosPlay 1.08rv", context.getString(R.string.about_us_description))
+        assertEquals("Created by Tkm", context.getString(R.string.about_us_creator))
+        assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
+
+        // 2. Verify locked-screen Hold Skip gating (2x hold + 1x..5x horizontal slide)
+        assertTrue(
+            "Hold skip must start smoothly when Screen Lock is active",
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = false,
+                activePointerCount = 1,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = false,
+                recentlyPinched = false,
+                isDoubleTapSkipActive = false,
+                allowWhenLocked = true
+            )
+        )
+        assertFalse(
+            "Locked hold skip must stay blocked during pinch-zoom",
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = false,
+                activePointerCount = 2,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = true,
+                recentlyPinched = true,
+                isDoubleTapSkipActive = false,
+                allowWhenLocked = true
+            )
+        )
+        assertFalse(
+            "Locked hold skip must stay blocked in PiP mode",
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = true,
+                activePointerCount = 1,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = false,
+                recentlyPinched = false,
+                isDoubleTapSkipActive = false,
+                allowWhenLocked = true
+            )
+        )
+
+        // 3. Verify calibrated deadzone/hysteresis 1x..5x horizontal speed stepping & redundant dispatch guard
+        assertEquals(
+            2.0f,
+            com.cyosplay.player.util.PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                startHoldSpeed = 2.0f,
+                totalDxPx = 12f,
+                containerWidthPx = 1100f,
+                currentHoldSpeed = 2.0f
+            ),
+            0.001f
+        )
+        assertEquals(
+            3.0f,
+            com.cyosplay.player.util.PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                startHoldSpeed = 2.0f,
+                totalDxPx = 220f,
+                containerWidthPx = 1100f,
+                currentHoldSpeed = 2.0f
+            ),
+            0.001f
+        )
+        assertEquals(
+            5.0f,
+            com.cyosplay.player.util.PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                startHoldSpeed = 2.0f,
+                totalDxPx = 900f,
+                containerWidthPx = 1100f,
+                currentHoldSpeed = 3.0f
+            ),
+            0.001f
+        )
+        assertEquals(
+            1.0f,
+            com.cyosplay.player.util.PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                startHoldSpeed = 2.0f,
+                totalDxPx = -260f,
+                containerWidthPx = 1100f,
+                currentHoldSpeed = 2.0f
+            ),
+            0.001f
+        )
+        assertFalse(
+            com.cyosplay.player.util.PlayerGestureControlHelper.shouldDispatchPlaybackSpeedChange(2.0f, 2.004f)
+        )
+        assertTrue(
+            com.cyosplay.player.util.PlayerGestureControlHelper.shouldDispatchPlaybackSpeedChange(2.0f, 3.0f)
+        )
+
+        // 4. Verify multi-format extractor factory & fast player builder
+        val extractors = XvidSupportExtractorsFactory().createExtractors()
+        assertTrue("Extractor factory must produce extractors", extractors.isNotEmpty())
+        assertNotNull(com.cyos.player.CyosFastPlayer.createWarmExoPlayerBuilder(context))
+
+        // 5. Verify 1.07rv7a encrypted release keystore password & JAR/Build code encryption
+        val keystoreToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7aToken(context)
+        assertEquals(
+            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7a)
+        )
+        val jarBuildToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7aToken(context)
+        assertEquals(
+            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7a)
+        )
+        val encryptedBuild107rv7a = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7a(
+            context,
+            "CYOSPLAY_1.07RV7A_SIGNED_ENCRYPTED_BUILD_CODE"
+        )
+        assertEquals(
+            "CYOSPLAY_1.07RV7A_SIGNED_ENCRYPTED_BUILD_CODE",
+            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv7a(context, encryptedBuild107rv7a)
+        )
+    }
+
+    @Test
+    fun v108rv_closedSourceCopyright_thirdPartyOssNotices_lockedHoldSkip_andJarEncryption_verification() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = VideoPlayerViewModel(context)
+
+        // 1. Verify 1.08rv branding, About Us "Created by Tkm", closed-source copyright, and permanent non-debug mode
+        assertEquals("1.08rv", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv", viewModel.uiState.value.appDescription)
+        assertEquals("Created by Tkm", viewModel.uiState.value.aboutUsCreator)
+        assertEquals("© 2026 TKm. All rights reserved.", viewModel.uiState.value.aboutUsCopyright)
+        assertEquals("CyosPlay 1.08rv", context.getString(R.string.about_us_description))
+        assertEquals("Created by Tkm", context.getString(R.string.about_us_creator))
+        assertEquals("© 2026 TKm. All rights reserved.", context.getString(R.string.about_us_copyright))
+        assertEquals("Third-Party Open Source Licenses", context.getString(R.string.open_source_licenses_title))
+        assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
+
+        // 2. Verify CyosPlay is Closed-Source Copyright (not MIT) & credits Media3 (Apache 2.0) and FFmpeg (LGPL v2.1+)
+        assertEquals("© 2026 TKm. All rights reserved.", com.cyosplay.player.data.OpenSourceLicenses.APP_COPYRIGHT_NOTICE)
+        assertEquals("Closed-Source", com.cyosplay.player.data.OpenSourceLicenses.APP_LICENSE_POSTURE)
+        assertTrue(com.cyosplay.player.data.OpenSourceLicenses.APP_PROPRIETARY_NOTICE.contains("closed-source"))
+        assertTrue(
+            com.cyosplay.player.data.OpenSourceLicenses.THIRD_PARTY_OSS_DISCLAIMER
+                .contains("does not make CyosPlay itself open source")
+        )
+        val notices = com.cyosplay.player.data.OpenSourceLicenses.thirdPartyNotices
+        assertEquals(2, notices.size)
+        assertTrue(
+            notices.any {
+                it.id == "androidx_media3_exoplayer" &&
+                    it.libraryName == "AndroidX Media3 ExoPlayer" &&
+                    it.licenseType == "Apache 2.0" &&
+                    it.licenseText.contains("Apache License, Version 2.0")
+            }
+        )
+        assertTrue(
+            notices.any {
+                it.id == "ffmpeg" &&
+                    it.libraryName == "FFmpeg" &&
+                    it.licenseType == "LGPL v2.1+" &&
+                    it.licenseText.contains("LGPL v2.1+")
+            }
+        )
+
+        // 3. Verify locked Hold Skip (2x + 1x..5x smooth stepping)
+        assertTrue(
+            com.cyosplay.player.util.PlayerGestureControlHelper.canStartHoldFastForward(
+                isPlaying = true,
+                isControlsLocked = true,
+                isInPipMode = false,
+                activePointerCount = 1,
+                isVerticalGestureActive = false,
+                isHorizontalSeekingActive = false,
+                isPinchZoomActive = false,
+                recentlyPinched = false,
+                isDoubleTapSkipActive = false,
+                allowWhenLocked = true
+            )
+        )
+        assertEquals(
+            4.0f,
+            com.cyosplay.player.util.PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                startHoldSpeed = 2.0f,
+                totalDxPx = 430f,
+                containerWidthPx = 1100f,
+                currentHoldSpeed = 3.0f
+            ),
+            0.001f
+        )
+
+        // 4. Verify 1.08rv encrypted release keystore password & JAR/Build code encryption
+        val keystoreToken108rv = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV108rvToken(context)
+        assertEquals(
+            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken108rv)
+        )
+        val jarBuildToken108rv = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV108rvToken(context)
+        assertEquals(
+            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken108rv)
+        )
+        val encryptedBuild108rv = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV108rv(
+            context,
+            "CYOSPLAY_1.08RV_SIGNED_ENCRYPTED_BUILD_CODE"
+        )
+        assertEquals(
+            "CYOSPLAY_1.08RV_SIGNED_ENCRYPTED_BUILD_CODE",
+            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV108rv(context, encryptedBuild108rv)
         )
     }
 }

@@ -314,7 +314,7 @@ fun FolderListScreen(
                             }
                         }
                         Text(
-                            text = "CyosPlay 1.07rv6",
+                            text = uiState.appDescription,
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

@@ -136,8 +136,10 @@ object PlayerGestureControlHelper {
     }
 
     /**
-     * Verifies whether a stationary long-press Hold Skip (2x fast-forward) is allowed to start.
-     * Strictly blocked if pinch-zoom, multi-touch, vertical brightness/volume, horizontal seek, or tap-skip is active.
+     * Verifies whether a stationary long-press Hold Skip (2x fast-forward with 1x..5x horizontal
+     * speed tuning) is allowed to start, including smoothly while Screen Lock is active
+     * (`allowWhenLocked = true`). Strictly blocked if pinch-zoom, multi-touch, vertical
+     * brightness/volume, horizontal seek, or tap-skip is active.
      */
     fun canStartHoldFastForward(
         isPlaying: Boolean = true,
@@ -148,17 +150,59 @@ object PlayerGestureControlHelper {
         isHorizontalSeekingActive: Boolean,
         isPinchZoomActive: Boolean,
         recentlyPinched: Boolean,
-        isDoubleTapSkipActive: Boolean = false
+        isDoubleTapSkipActive: Boolean = false,
+        allowWhenLocked: Boolean = true
     ): Boolean {
         return isPlaying &&
-            !isControlsLocked &&
+            (allowWhenLocked || !isControlsLocked) &&
             !isInPipMode &&
-            activePointerCount == 1 &&
+            activePointerCount <= 1 &&
             !isVerticalGestureActive &&
             !isHorizontalSeekingActive &&
             !isPinchZoomActive &&
             !recentlyPinched &&
             !isDoubleTapSkipActive
+    }
+
+    /**
+     * Computes a discrete 1.0x..5.0x hold-skip speed multiplier from accumulated horizontal slide distance
+     * with a calibrated deadzone and hysteresis so minor thumb tremor never thrashes playback speed
+     * or wastes CPU/battery while holding.
+     */
+    fun computeHoldSkipSpeedStep(
+        startHoldSpeed: Float,
+        totalDxPx: Float,
+        containerWidthPx: Float,
+        currentHoldSpeed: Float = startHoldSpeed
+    ): Float {
+        val clampedStart = startHoldSpeed.coerceIn(1.0f, 5.0f).roundToInt().toFloat()
+        val clampedCurrent = currentHoldSpeed.coerceIn(1.0f, 5.0f).roundToInt().toFloat()
+        if (!totalDxPx.isFinite() || !containerWidthPx.isFinite() || containerWidthPx <= 0f) {
+            return clampedCurrent
+        }
+        val stepWidthPx = (containerWidthPx / 5.5f).coerceAtLeast(48f)
+        val deadzonePx = stepWidthPx * 0.22f
+        if (abs(totalDxPx) < deadzonePx && clampedCurrent == clampedStart) {
+            return clampedStart
+        }
+        val rawContinuous = (clampedStart + (totalDxPx / stepWidthPx)).coerceIn(1.0f, 5.0f)
+        return if (abs(rawContinuous - clampedCurrent) >= 0.62f) {
+            rawContinuous.roundToInt().coerceIn(1, 5).toFloat()
+        } else {
+            clampedCurrent
+        }
+    }
+
+    /**
+     * Returns true only when the requested playback speed differs meaningfully from the player's
+     * current speed, preventing redundant audio-pipeline reconfigurations and CPU wakeups.
+     */
+    fun shouldDispatchPlaybackSpeedChange(
+        currentPlayerSpeed: Float,
+        targetSpeed: Float
+    ): Boolean {
+        if (!currentPlayerSpeed.isFinite() || !targetSpeed.isFinite()) return true
+        return abs(currentPlayerSpeed - targetSpeed) >= 0.01f
     }
 
     /**

@@ -1,6 +1,7 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    id("com.google.android.gms.oss-licenses-plugin")
 }
 
 android {
@@ -11,8 +12,8 @@ android {
         applicationId = "com.cyosplay.player"
         minSdk = 24
         targetSdk = 36
-        versionCode = 38
-        versionName = "1.07rv6"
+        versionCode = 43
+        versionName = "1.08rv"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MAJOR_CAPABILITY_ID", "\"cyos play\"")
@@ -99,6 +100,8 @@ dependencies {
     implementation(libs.androidx.biometric)
     implementation(libs.androidx.security.crypto)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.play.services.oss.licenses)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
@@ -114,6 +117,21 @@ dependencies {
 
 afterEvaluate {
     listOf(
+        "CyosPlay-v1.07rv7b-release-signed-apk.zip",
+        "CyosPlay-v1.07rv7b-release-signed.apk",
+        "cyosplay-1.07rv7b-release.apk",
+        "CyosPlay-v1.07rv7a-release-signed-apk.zip",
+        "CyosPlay-v1.07rv7a-release-signed.apk",
+        "cyosplay-1.07rv7a-release.apk",
+        "CyosPlay-v1.07rv8-release-signed-apk.zip",
+        "CyosPlay-v1.07rv8-release-signed.apk",
+        "cyosplay-1.07rv8-release.apk",
+        "CyosPlay-v1.07rv7-release-signed-apk.zip",
+        "CyosPlay-v1.07rv7-release-signed.apk",
+        "cyosplay-1.07rv7-release.apk",
+        "CyosPlay-v1.07rv6-release-signed-apk.zip",
+        "CyosPlay-v1.07rv6-release-signed.apk",
+        "cyosplay-1.07rv6-release.apk",
         "CyosPlay-v1.07rv5-release-signed.apk",
         "cyosplay-1.07rv5-release.apk",
         "CyosPlay-v1.07rv4-release-signed.apk",
@@ -186,12 +204,7 @@ afterEvaluate {
             file.delete()
         }
     }
-    tasks.findByName("assembleRelease")?.doLast {
-        val builtApk = layout.buildDirectory.file("outputs/apk/release/app-release.apk").get().asFile
-        if (builtApk.exists()) {
-            builtApk.copyTo(rootProject.file("CyosPlay-v1.07rv6-release-signed.apk"), overwrite = true)
-            builtApk.copyTo(rootProject.file("cyosplay-1.07rv6-release.apk"), overwrite = true)
-        }
-    }
 }
+
+apply(from = rootProject.file("gradle/verify-release-security.gradle.kts"))
 

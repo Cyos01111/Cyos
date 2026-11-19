@@ -1,34 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Find Android SDK build tools apksigner
-APKSIGNER=$(find "${ANDROID_SDK_ROOT:-/opt/android/sdk}"/build-tools -name apksigner | sort -V | tail -n1)
-
-if [ -z "$APKSIGNER" ]; then
-    echo "Error: apksigner not found in ANDROID_SDK_ROOT."
-    exit 1
-fi
-
-KEYSTORE_PATH="cyosplay-release.keystore"
-KEY_ALIAS="cyosplay_release"
-STORE_PASS="cyosplay2026"
-KEY_PASS="cyosplay2026"
-
-INPUT_APK="${1:-app/build/outputs/apk/release/app-release.apk}"
-ROOT_APK="cyosplay-1.03-release.apk"
-
-echo "Building release APK via Gradle..."
+echo "Building and verifying signed release APK via Gradle (assembleRelease + verifyReleaseSignatureAndEncryption)..."
 gradle :app:assembleRelease
 
-if [ ! -f "$INPUT_APK" ]; then
-    echo "Error: Release APK not generated at $INPUT_APK"
+ROOT_SIGNED_APK="CyosPlay-v1.08rv-release-signed.apk"
+INTEGRITY_ENVELOPE="app/build/outputs/apk/release/release-integrity.enc"
+
+if [ ! -f "$ROOT_SIGNED_APK" ] || [ ! -f "$INTEGRITY_ENVELOPE" ]; then
+    echo "Error: Verified release APK or encrypted integrity envelope not found."
     exit 1
 fi
 
-echo "Copying signed release APK to project root ($ROOT_APK)..."
-cp "$INPUT_APK" "$ROOT_APK"
-
-echo "Verifying release signatures on $INPUT_APK and $ROOT_APK..."
-"$APKSIGNER" verify --verbose --print-certs "$INPUT_APK"
-
-echo "Successfully verified signed release APK: $INPUT_APK and $ROOT_APK"
+echo "Verified signed release APK ($ROOT_SIGNED_APK) and encrypted integrity envelope ($INTEGRITY_ENVELOPE)."

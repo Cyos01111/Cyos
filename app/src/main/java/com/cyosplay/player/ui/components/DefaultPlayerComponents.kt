@@ -1411,7 +1411,7 @@ fun MiniPlayerFloatingBar(
             // Compact 4MB buffer & 32KB allocator chunks with 15s back-buffer for fast instant seeking in Mini-Player
             val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
                 .setAllocator(androidx.media3.exoplayer.upstream.DefaultAllocator(true, 32 * 1024))
-                .setBufferDurationsMs(5_000, 15_000, 350, 1_000)
+                .setBufferDurationsMs(10_000, 20_000, 600, 1_500)
                 .setTargetBufferBytes(4 * 1024 * 1024)
                 .setBackBuffer(15_000, true)
                 .setPrioritizeTimeOverSizeThresholds(true)

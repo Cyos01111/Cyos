@@ -42,17 +42,20 @@ import kotlin.math.abs
 @OptIn(UnstableApi::class)
 class XvidSupportExtractorsFactory : ExtractorsFactory {
     private val subtitleParserFactory = DefaultSubtitleParserFactory()
+    @Suppress("DEPRECATION")
     private val defaultFactory = DefaultExtractorsFactory()
         .setSubtitleParserFactory(subtitleParserFactory)
-        .experimentalSetTextTrackTranscodingEnabled(true)
+        .setTextTrackTranscodingEnabled(true)
         .setConstantBitrateSeekingEnabled(true)
         .setConstantBitrateSeekingAlwaysEnabled(true)
         .setAdtsExtractorFlags(AdtsExtractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
         .setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
         .setTsExtractorFlags(
             DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+                DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
+                DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
         )
+        .setTsExtractorTimestampSearchBytes(1_024 * 1_024)
 
     override fun createExtractors(): Array<Extractor> {
         return defaultFactory.createExtractors().map { extractor ->
@@ -300,14 +303,18 @@ fun createXvidAwareMediaCodecSelector(
         )
         if (preferSoftwareForAllCodecs ||
             mimeType == MimeTypes.VIDEO_MP4V ||
+            mimeType == MimeTypes.VIDEO_DIVX ||
+            mimeType == MimeTypes.VIDEO_FLV ||
+            mimeType == MimeTypes.VIDEO_MPEG ||
             mimeType.contains("mp4v", ignoreCase = true) ||
             mimeType.contains("xvid", ignoreCase = true) ||
             mimeType.contains("divx", ignoreCase = true)
         ) {
-            // Put software decoders (c2.android.mpeg4.decoder / OMX.google.mpeg4.decoder) first
+            // Put software decoders first for legacy packed-B-frame/Xvid/DivX/FLV streams
             decoders.sortedBy { info: MediaCodecInfo -> info.hardwareAccelerated }
         } else {
-            decoders
+            // Keep hardware-accelerated decoders first for H.264/HEVC/VP9/AV1 to minimize CPU & battery drain
+            decoders.sortedByDescending { info: MediaCodecInfo -> info.hardwareAccelerated }
         }
     }
 }
@@ -367,6 +374,7 @@ fun buildCyosExoPlayer(
 
     return builder.build().apply {
         videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        videoChangeFrameRateStrategy = C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
     }
 }
 

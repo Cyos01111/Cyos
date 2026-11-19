@@ -19,17 +19,11 @@ object CyosMediaCache {
     private var simpleCache: SimpleCache? = null
 
     fun getCache(context: Context): SimpleCache {
-        return simpleCache ?: synchronized(this) {
-            simpleCache ?: SimpleCache(
-                File(context.applicationContext.cacheDir, "cyos_media_cache"),
-                LeastRecentlyUsedCacheEvictor(MAX_CACHE_BYTES),
-                StandaloneDatabaseProvider(context.applicationContext)
-            ).also { simpleCache = it }
-        }
+        return CyosCacheProvider.getOrCreate(context.applicationContext ?: context)
     }
 
     fun buildCacheDataSourceFactory(context: Context): CacheDataSource.Factory {
-        val appContext = context.applicationContext
+        val appContext = context.applicationContext ?: context
         val httpFactory = DefaultHttpDataSource.Factory()
             .setConnectTimeoutMs(8_000)
             .setReadTimeoutMs(8_000)
@@ -44,13 +38,6 @@ object CyosMediaCache {
     }
 
     fun releaseCache() {
-        synchronized(this) {
-            try {
-                simpleCache?.release()
-            } catch (_: Throwable) {
-            } finally {
-                simpleCache = null
-            }
-        }
+        CyosCacheProvider.release()
     }
 }
