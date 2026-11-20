@@ -664,51 +664,76 @@ fun VideoPlayerScreen(
     val preloadManager = playerSession.preloadManager
     val preloadStatusControl = playerSession.statusControl
 
-    LaunchedEffect(playerSession, playlistQueue) {
+    // Restrict preload queue to a tight 3-item sliding window (prev, current, next) to keep RAM & CPU flat
+    LaunchedEffect(playerSession, playlistQueue, activeVideo.path) {
         if (playlistQueue.isNotEmpty()) {
-            val items = playlistQueue.map { MediaItem.fromUri(it.uri) }
-            preloadManager.reset()
-            items.forEachIndexed { idx, mediaItem ->
-                preloadManager.add(mediaItem, idx)
+            val activeIdx = playlistQueue.indexOfFirst { it.path == activeVideo.path }.coerceAtLeast(0)
+            val startIdx = (activeIdx - 1).coerceAtLeast(0)
+            val endIdx = (activeIdx + 1).coerceAtMost(playlistQueue.lastIndex)
+            runCatching {
+                preloadManager.reset()
+                for (idx in startIdx..endIdx) {
+                    preloadManager.add(MediaItem.fromUri(playlistQueue[idx].uri), idx)
+                }
+                preloadStatusControl.currentPlayingIndex = activeIdx
+                preloadManager.setCurrentPlayingIndex(activeIdx)
+                preloadManager.invalidate()
             }
-            preloadManager.invalidate()
         }
     }
 
     val exoPlayer = remember(playerSession) {
         playerSession.player.apply {
+            runCatching {
                 videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-                addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        val recoveredFromSubtitle = com.cyosplay.player.handleNonFatalSubtitleErrorIfApplicable(
-                            context = context,
-                            player = this@apply,
-                            error = error
-                        ) {
-                            liveEmbeddedCueTexts = emptyList()
-                            pendingAttachedSubtitleUri = null
-                            viewModel.clearAllSubtitles()
-                        }
-                        if (recoveredFromSubtitle) {
-                            isMediaLoading = false
-                            mediaErrorType = PlayerMediaErrorType.NONE
-                            return
-                        }
-                        if (uiState.forceHardwareAccelerationHighBitrate) {
-                            viewModel.setForceHardwareAccelerationHighBitrate(false)
-                        }
-                        val nextFallback = viewModel.fallbackToNextDecoderEngine()
-                        if (nextFallback == null) {
-                            isMediaLoading = false
-                            val isNetwork = activeVideo.uri.scheme?.startsWith("http", ignoreCase = true) == true
-                            mediaErrorType = FfmpegMatroskaCodecRegistry.classifyPlaybackError(
-                                errorCode = error.errorCode,
-                                errorMessage = error.message,
-                                isNetworkSource = isNetwork,
-                                durationMs = totalDurationMs
-                            )
-                        }
-                    }
+            }
+        }
+    }
+
+    // Properly attach and detach Player.Listener via DisposableEffect to prevent pooled listener leaks & playback crashes
+    DisposableEffect(exoPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                val recoveredFromSubtitle = com.cyosplay.player.handleNonFatalSubtitleErrorIfApplicable(
+                    context = context,
+                    player = exoPlayer,
+                    error = error
+                ) {
+                    liveEmbeddedCueTexts = emptyList()
+                    pendingAttachedSubtitleUri = null
+                    viewModel.clearAllSubtitles()
+                }
+                if (recoveredFromSubtitle) {
+                    isMediaLoading = false
+                    mediaErrorType = PlayerMediaErrorType.NONE
+                    return
+                }
+                // Snapshot exact playback timestamp before switching to software/FFmpeg decoder fallback
+                val preservedPos = runCatching { exoPlayer.currentPosition }.getOrDefault(currentPositionMs)
+                if (preservedPos > 0L) {
+                    currentPositionMs = preservedPos
+                }
+                if (uiState.forceHardwareAccelerationHighBitrate) {
+                    viewModel.setForceHardwareAccelerationHighBitrate(false)
+                }
+                val nextFallback = if (com.cyosplay.player.isRecoverableDecoderOrAudioSinkError(error) ||
+                    uiState.decoderEngineMode != DecoderEngineMode.SW_PLUS
+                ) {
+                    viewModel.fallbackToNextDecoderEngine()
+                } else {
+                    null
+                }
+                if (nextFallback == null) {
+                    isMediaLoading = false
+                    val isNetwork = activeVideo.uri.scheme?.startsWith("http", ignoreCase = true) == true
+                    mediaErrorType = FfmpegMatroskaCodecRegistry.classifyPlaybackError(
+                        errorCode = error.errorCode,
+                        errorMessage = error.message,
+                        isNetworkSource = isNetwork,
+                        durationMs = totalDurationMs
+                    )
+                }
+            }
 
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         if (playbackState == Player.STATE_BUFFERING) {
@@ -718,12 +743,15 @@ fun VideoPlayerScreen(
                         } else if (playbackState == Player.STATE_READY) {
                             isMediaLoading = false
                             mediaErrorType = PlayerMediaErrorType.NONE
-                            val dur = duration
+                            val dur = runCatching { exoPlayer.duration }.getOrDefault(C.TIME_UNSET)
                             if (dur > 0L) {
                                 totalDurationMs = dur
                             }
-                            if (!isUserScrubbing && currentPosition >= 0L) {
-                                currentPositionMs = currentPosition
+                            if (!isUserScrubbing) {
+                                val pos = runCatching { exoPlayer.currentPosition }.getOrDefault(-1L)
+                                if (pos >= 0L) {
+                                    currentPositionMs = pos
+                                }
                             }
                         } else if (playbackState == Player.STATE_ENDED) {
                             isMediaLoading = false
@@ -732,12 +760,14 @@ fun VideoPlayerScreen(
                                 activeVideo = playlistQueue[idx + 1]
                                 currentPositionMs = 0L
                                 isPlaying = true
-                                playWhenReady = true
+                                runCatching { exoPlayer.playWhenReady = true }
                             } else {
-                                seekTo(0L)
+                                runCatching {
+                                    exoPlayer.seekTo(0L)
+                                    exoPlayer.playWhenReady = false
+                                }
                                 currentPositionMs = 0L
                                 isPlaying = false
-                                playWhenReady = false
                             }
                         }
                     }
@@ -843,10 +873,12 @@ fun VideoPlayerScreen(
                             val savedAudio = viewModel.getSavedAudioTrackForVideo(activeVideo.path)
                             if (savedAudio != null) {
                                 if (savedAudio.isMuted) {
-                                    trackSelectionParameters = trackSelectionParameters
-                                        .buildUpon()
-                                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
-                                        .build()
+                                    runCatching {
+                                        exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                            .buildUpon()
+                                            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                                            .build()
+                                    }
                                     viewModel.setAudioMuted(true, activeVideo.path)
                                 } else {
                                     val matchedTrack = discoveredAudio.firstOrNull {
@@ -861,16 +893,18 @@ fun VideoPlayerScreen(
                                         if (matchedTrack.groupIndex in groups.indices) {
                                             val audioGroup = groups[matchedTrack.groupIndex]
                                             if (matchedTrack.trackIndex in 0 until audioGroup.length) {
-                                                trackSelectionParameters = trackSelectionParameters
-                                                    .buildUpon()
-                                                    .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
-                                                    .setOverrideForType(
-                                                        TrackSelectionOverride(
-                                                            audioGroup.mediaTrackGroup,
-                                                            listOf(matchedTrack.trackIndex)
+                                                runCatching {
+                                                    exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
+                                                        .buildUpon()
+                                                        .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, false)
+                                                        .setOverrideForType(
+                                                            TrackSelectionOverride(
+                                                                audioGroup.mediaTrackGroup,
+                                                                listOf(matchedTrack.trackIndex)
+                                                            )
                                                         )
-                                                    )
-                                                    .build()
+                                                        .build()
+                                                }
                                                 for (i in discoveredAudio.indices) {
                                                     val item = discoveredAudio[i]
                                                     discoveredAudio[i] = item.copy(
@@ -904,13 +938,18 @@ fun VideoPlayerScreen(
                     }
 
                     override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
-                        val formatted = cueGroup.cues.mapNotNull { cue ->
-                            cue.text?.toString()?.let { SubtitleParser.formatSubtitleTextForDisplay(it) }?.takeIf { it.isNotBlank() }
-                        }
+                        val formatted = runCatching {
+                            cueGroup.cues.mapNotNull { cue ->
+                                cue.text?.toString()?.let { SubtitleParser.formatSubtitleTextForDisplay(it) }?.takeIf { it.isNotBlank() }
+                            }
+                        }.getOrDefault(emptyList())
                         liveEmbeddedCueTexts = formatted
                     }
-                })
-            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose {
+            runCatching { exoPlayer.removeListener(listener) }
+        }
     }
 
     LaunchedEffect(activeVideo.uri, playerSession) {
@@ -1013,9 +1052,28 @@ fun VideoPlayerScreen(
         } else {
             uiState.playbackSpeed.coerceIn(0.25f, 5.0f)
         }
-        if (PlayerGestureControlHelper.shouldDispatchPlaybackSpeedChange(exoPlayer.playbackParameters.speed, effectiveSpeed)) {
-            exoPlayer.setPlaybackSpeed(effectiveSpeed)
+        runCatching {
+            if (PlayerGestureControlHelper.shouldDispatchPlaybackSpeedChange(exoPlayer.playbackParameters.speed, effectiveSpeed)) {
+                exoPlayer.setPlaybackSpeed(effectiveSpeed)
+            }
         }
+    }
+
+    // Flush any final coalesced double-tap skip target once after rapid taps settle (prevents skipped taps while keeping CPU/battery low)
+    var pendingCoalescedDoubleTapTargetMs by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(exoPlayer, pendingCoalescedDoubleTapTargetMs) {
+        val pendingTarget = pendingCoalescedDoubleTapTargetMs ?: return@LaunchedEffect
+        delay(160L)
+        runCatching {
+            exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+            exoPlayer.playWhenReady = true
+            exoPlayer.seekTo(pendingTarget)
+            if (!exoPlayer.isPlaying) {
+                exoPlayer.play()
+            }
+        }
+        lastDoubleTapSeekElapsedMs = SystemClock.elapsedRealtime()
+        pendingCoalescedDoubleTapTargetMs = null
     }
 
     // CPU-optimized position & checkpoint loop (pauses when video is paused; throttles during gestures or hidden controls)
@@ -1562,15 +1620,19 @@ fun VideoPlayerScreen(
                             doubleTapCumulativeDeltaMs = skipCalc.cumulativeDeltaMs
                             // Coalesce rapid double-tap seeks with CLOSEST_SYNC to prevent decoder queue spikes, CPU load & battery drain
                             val target = if (skipCalc.shouldDispatchPlayerSeek) {
+                                pendingCoalescedDoubleTapTargetMs = null
                                 lastDoubleTapSeekElapsedMs = nowElapsed
-                                exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
-                                exoPlayer.playWhenReady = true
-                                exoPlayer.seekTo(skipCalc.targetPositionMs)
-                                if (!exoPlayer.isPlaying) {
-                                    exoPlayer.play()
+                                runCatching {
+                                    exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
+                                    exoPlayer.playWhenReady = true
+                                    exoPlayer.seekTo(skipCalc.targetPositionMs)
+                                    if (!exoPlayer.isPlaying) {
+                                        exoPlayer.play()
+                                    }
                                 }
                                 skipCalc.targetPositionMs
                             } else {
+                                pendingCoalescedDoubleTapTargetMs = skipCalc.targetPositionMs
                                 skipCalc.targetPositionMs
                             }
                             currentPositionMs = target

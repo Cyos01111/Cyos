@@ -4,17 +4,18 @@ import android.Manifest
 import android.os.Build
 
 /**
- * Centralizes runtime compatibility across Android 7.0 Nougat (API 24) through Android 17 (API 37+),
+ * Centralizes runtime compatibility across Android 7.0 Nougat (API 24) through Android 18 (API 38+),
  * covering tiered media/storage permissions, Picture-in-Picture (PiP) capabilities and safe aspect-ratio
  * clamping, and GPU RenderEffect / hardware-decoder guards.
  */
 object AndroidVersionCompatHelper {
 
     const val MIN_SUPPORTED_ANDROID_VERSION: Int = 7
-    const val MAX_SUPPORTED_ANDROID_VERSION: Int = 17
+    const val MAX_SUPPORTED_ANDROID_VERSION: Int = 18
     const val MIN_SUPPORTED_API_LEVEL: Int = Build.VERSION_CODES.N // API 24 (Android 7.0)
     const val ANDROID_16_API_LEVEL: Int = 36
     const val ANDROID_17_API_LEVEL: Int = 37
+    const val ANDROID_18_API_LEVEL: Int = 38
 
     fun isSupportedAndroidSdk(sdkInt: Int = Build.VERSION.SDK_INT): Boolean {
         return sdkInt >= MIN_SUPPORTED_API_LEVEL
@@ -22,11 +23,11 @@ object AndroidVersionCompatHelper {
 
     /**
      * Resolves the exact runtime media/storage permission array for any Android OS release
-     * from Android 7.0 (API 24) through Android 17 (API 37+):
+     * from Android 7.0 (API 24) through Android 18 (API 38+):
      * - Android 7.0–9.0 (API 24–28): READ_EXTERNAL_STORAGE + WRITE_EXTERNAL_STORAGE
      * - Android 10–12L (API 29–32): READ_EXTERNAL_STORAGE (Scoped Storage)
      * - Android 13 (API 33): READ_MEDIA_VIDEO + READ_MEDIA_AUDIO
-     * - Android 14–17+ (API 34–37+): READ_MEDIA_VIDEO + READ_MEDIA_AUDIO + READ_MEDIA_VISUAL_USER_SELECTED
+     * - Android 14–18+ (API 34–38+): READ_MEDIA_VIDEO + READ_MEDIA_AUDIO + READ_MEDIA_VISUAL_USER_SELECTED
      */
     fun resolveRuntimeMediaPermissions(sdkInt: Int = Build.VERSION.SDK_INT): Array<String> {
         return when {

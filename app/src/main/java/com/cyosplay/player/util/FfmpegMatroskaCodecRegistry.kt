@@ -19,11 +19,13 @@ object FfmpegMatroskaCodecRegistry {
     const val MUXING_APP_LAVF = "Lavf60.3.100"
     const val MUXING_APP_LAVF_62 = "Lavf62.3.100"
     const val MATROSKA_MUXING_APP =
-        "Lavf62.3.100 / Lavf60.3.100 / mkvmerge v56.1.0 ('My Friend') 64-bit / libebml v1.4.2 + libmatroska v1.6.4 / libebml v14.2 + libmatroska v1.6.4"
+        "Lavf62.3.100 / Lavf60.3.100 / mkvmerge v56.1.0 ('My Friend') 64-bit / libebml v1.4.5 + libmatroska v1.7.1 / libebml v1.4.2 + libmatroska v1.6.4 / libebml v14.2 + libmatroska v1.6.4"
     const val WRITING_LIBRARY_LAVF =
-        "Lavf62.3.100 / Lavf60.3.100 / mkvmerge v56.1.0 ('My Friend') 64-bit / libebml v1.4.2 + libmatroska v1.6.4 / libebml v1.4.7 + libmatroska v1.7.2 / Encoding SW / Encodina SW: libebml v14.2 + libmatroska v1.6.4"
+        "Lavf62.3.100 / Lavf60.3.100 / mkvmerge v56.1.0 ('My Friend') 64-bit / libebml v1.4.5 + libmatroska v1.7.1 / libebml v1.4.2 + libmatroska v1.6.4 / libebml v1.4.7 + libmatroska v1.7.2 / Encoding SW / Encodina SW: libebml v14.2 + libmatroska v1.6.4"
+    const val LIBEBML_V1_4_5_LIBMATROSKA_V1_7_1_SPEC =
+        "matroska/webm • 1920x1080 • libebml v1.4.5 + libmatroska v1.7.1 • HEVC (H.265) • AAC • Opus • ASS"
     const val LIBEBML_LIBMATROSKA_V14_2_SPEC =
-        "Encoding SW: Lavf62.3.100 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 (Matroska/WebM • mkvmerge v56.1.0 ('My Friend') 64-bit)"
+        "Encoding SW: Lavf62.3.100 • libebml v1.4.5 + libmatroska v1.7.1 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 (Matroska/WebM • mkvmerge v56.1.0 ('My Friend') 64-bit)"
     const val VIDEO_CODEC_MPEG4_PART2_ASP_SPEC =
         "MPEG-4 Part 2 (XVID) (Advanced Simple Profile with packed B-frames) • Video Codec MPEG-4 part 2 (ASP • Advanced Simple Profile (Level 5) • XVID (0x44495658) • 704x396 • SAR 396:563 • DAR 704:563 • 25.000 fps • Extradata Size: 58 bytes)"
     const val VIDEO_CODEC_XVID_PACKED_BFRAMES_SPEC =
@@ -57,7 +59,7 @@ object FfmpegMatroskaCodecRegistry {
     const val LIBSWRESAMPLE_VERSION = "libswresample 4.12.100"
 
     const val FULL_FFMPEG_LIBRARY_SUITE =
-        "Lavf62.3.100 • Lavf60.3.100 • mkvmerge v56.1.0 ('My Friend') 64-bit • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 • HE-AAC • libavformat 62.3.100 • libavcodec 60.31.102 • libavutil 58.29.100 • libswscale 7.5.100 • libswresample 4.12.100 • FFmpeg extension • MediaInfo / FFprobe"
+        "Lavf62.3.100 • Lavf60.3.100 • mkvmerge v56.1.0 ('My Friend') 64-bit • libebml v1.4.5 + libmatroska v1.7.1 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • HEVC (H.265) • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 • AAC • HE-AAC • Opus • ASS • libavformat 62.3.100 • libavcodec 60.31.102 • libavutil 58.29.100 • libswscale 7.5.100 • libswresample 4.12.100 • FFmpeg extension • MediaInfo / FFprobe"
 
     /**
      * All 12 supported audio sample rates (in Hz and formatted display strings):
@@ -104,6 +106,7 @@ object FfmpegMatroskaCodecRegistry {
         "LC (Low Complexity)",
         "AAC-LC (Low Complexity, mp4a.40.2)",
         "AAC (Advanced Audio Coding)",
+        "Opus (A_OPUS • 48 kHz Stereo/Multichannel)",
         "fltp (32-bit floating-point planar)"
     )
 
@@ -111,6 +114,7 @@ object FfmpegMatroskaCodecRegistry {
         "Lavf62.3.100",
         "Lavf60.3.100",
         "mkvmerge v56.1.0 ('My Friend') 64-bit",
+        "libebml v1.4.5 + libmatroska v1.7.1",
         "libebml v1.4.2 + libmatroska v1.6.4",
         "libebml v14.2 + libmatroska v1.6.4",
         "libebml v1.4.7 + libmatroska v1.7.2",
@@ -208,7 +212,9 @@ object FfmpegMatroskaCodecRegistry {
         "xvid", "0x44495658", "divx", "dx50", "fmp4", "libx264", "yuv420p", "faststart",
         "v_ms/vfw/fourcc", "mp4v.20.5", "divx503b1393p", "video/mp4v-es", "video/x-unknown", "csd-0",
         "c2.android.mpeg4.decoder", "omx.google.mpeg4.decoder",
-        "mkvmerge", "matroska,webm", "lavf62.3.100", "lavf60.3.100",
+        "mkvmerge", "matroska,webm", "matroska/webm", "lavf62.3.100", "lavf60.3.100",
+        "libebml v1.4.5 + libmatroska v1.7.1", "opus", "a_opus", "ass", "ssa", "s_text/ass", "s_text/ssa",
+        "v_mpegh/iso/hevc", "h265", "hev1", "hvc1",
         "h.264 / avc / mpeg-4 avc / mpeg-4 part 10", "mpeg-4 part 10", "mpeg-4 avc"
     )
 
@@ -519,6 +525,31 @@ object FfmpegMatroskaCodecRegistry {
                 append(" | Audio Hint: $resolvedAudioHint")
             }
         }
+    }
+
+    data class MatroskaHevcOpusAss1080pSpec(
+        val formatName: String = "matroska/webm",
+        val width: Int = 1920,
+        val height: Int = 1080,
+        val muxingLibrary: String = "libebml v1.4.5 + libmatroska v1.7.1",
+        val videoCodec: String = "hevc",
+        val audioCodecs: List<String> = listOf("aac", "opus"),
+        val subtitleCodec: String = "ass"
+    )
+
+    val MATROSKA_HEVC_OPUS_ASS_1080P_SPEC = MatroskaHevcOpusAss1080pSpec()
+
+    fun isSupportedMatroskaHevcOpusAssSpec(
+        spec: MatroskaHevcOpusAss1080pSpec = MATROSKA_HEVC_OPUS_ASS_1080P_SPEC
+    ): Boolean {
+        val containerOk = spec.formatName.contains("matroska", ignoreCase = true) &&
+            spec.formatName.contains("webm", ignoreCase = true)
+        val resOk = isSupportedCinemaOrMatroskaResolution(spec.width, spec.height)
+        val muxerOk = SUPPORTED_ENCODING_SOFTWARE.any { it.equals(spec.muxingLibrary, ignoreCase = true) }
+        val videoOk = findCodecByCode(spec.videoCodec) != null
+        val audioOk = spec.audioCodecs.all { findCodecByCode(it) != null }
+        val subtitleOk = findCodecByCode(spec.subtitleCodec) != null
+        return containerOk && resOk && muxerOk && videoOk && audioOk && subtitleOk
     }
 
     data class MatroskaMpeg4XvidStreamSpec(

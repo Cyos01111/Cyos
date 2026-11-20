@@ -94,16 +94,16 @@ class XvidMatroskaExtractor(
     )
 ) : Extractor {
 
-    override fun sniff(input: ExtractorInput): Boolean = delegate.sniff(input)
+    override fun sniff(input: ExtractorInput): Boolean = runCatching { delegate.sniff(input) }.getOrDefault(false)
 
     override fun init(output: ExtractorOutput) {
         delegate.init(object : ExtractorOutput {
             override fun track(id: Int, type: Int): TrackOutput {
-                val originalTrack = delegate.let { output.track(id, type) }
-                return if (type == C.TRACK_TYPE_VIDEO) {
-                    XvidFixingTrackOutput(originalTrack)
-                } else {
-                    originalTrack
+                val originalTrack = output.track(id, type)
+                return when (type) {
+                    C.TRACK_TYPE_VIDEO -> XvidFixingTrackOutput(originalTrack)
+                    C.TRACK_TYPE_TEXT -> SafeSubtitleTrackOutput(originalTrack)
+                    else -> originalTrack
                 }
             }
 
@@ -115,9 +115,76 @@ class XvidMatroskaExtractor(
     override fun read(input: ExtractorInput, seekPosition: PositionHolder): Int =
         delegate.read(input, seekPosition)
 
-    override fun seek(position: Long, timeUs: Long) = delegate.seek(position, timeUs)
+    override fun seek(position: Long, timeUs: Long) {
+        runCatching { delegate.seek(position, timeUs) }
+    }
 
-    override fun release() = delegate.release()
+    override fun release() {
+        runCatching { delegate.release() }
+    }
+}
+
+/**
+ * Crash-safe wrapper around embedded Matroska/WebM text tracks (including S_TEXT/ASS and S_TEXT/SSA
+ * inside libebml v1.4.5 + libmatroska v1.7.1 containers) so malformed subtitle dialogue lines or
+ * truncated cue packets never crash video playback.
+ */
+@OptIn(UnstableApi::class)
+private class SafeSubtitleTrackOutput(
+    private val delegate: TrackOutput
+) : TrackOutput {
+
+    private var textTrackFaulted = false
+
+    override fun format(format: Format) {
+        runCatching { delegate.format(format) }.onFailure { textTrackFaulted = true }
+    }
+
+    override fun sampleData(
+        input: androidx.media3.common.DataReader,
+        length: Int,
+        allowEndOfInput: Boolean,
+        sampleDataPart: Int
+    ): Int {
+        if (textTrackFaulted) {
+            val skipBuf = ByteArray(minOf(length.coerceAtLeast(1), 4096))
+            val read = runCatching { input.read(skipBuf, 0, minOf(length, skipBuf.size)) }.getOrDefault(C.RESULT_END_OF_INPUT)
+            return if (read == C.RESULT_END_OF_INPUT && allowEndOfInput) C.RESULT_END_OF_INPUT else read.coerceAtLeast(0)
+        }
+        return runCatching {
+            delegate.sampleData(input, length, allowEndOfInput, sampleDataPart)
+        }.getOrElse {
+            textTrackFaulted = true
+            if (allowEndOfInput) C.RESULT_END_OF_INPUT else 0
+        }
+    }
+
+    override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
+        if (textTrackFaulted) {
+            data.skipBytes(minOf(length, data.bytesLeft()).coerceAtLeast(0))
+            return
+        }
+        runCatching {
+            delegate.sampleData(data, length, sampleDataPart)
+        }.onFailure {
+            textTrackFaulted = true
+        }
+    }
+
+    override fun sampleMetadata(
+        timeUs: Long,
+        flags: Int,
+        size: Int,
+        offset: Int,
+        cryptoData: TrackOutput.CryptoData?
+    ) {
+        if (textTrackFaulted) return
+        runCatching {
+            delegate.sampleMetadata(timeUs, flags, size, offset, cryptoData)
+        }.onFailure {
+            textTrackFaulted = true
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -296,11 +363,21 @@ fun createXvidAwareMediaCodecSelector(
     preferSoftwareForAllCodecs: Boolean = false
 ): MediaCodecSelector {
     return MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
-        val decoders = fallbackSelector.getDecoderInfos(
-            mimeType,
-            requiresSecureDecoder,
-            requiresTunnelingDecoder
-        )
+        val decoders = runCatching {
+            fallbackSelector.getDecoderInfos(
+                mimeType,
+                requiresSecureDecoder,
+                requiresTunnelingDecoder
+            )
+        }.getOrElse {
+            runCatching {
+                MediaCodecSelector.DEFAULT.getDecoderInfos(
+                    mimeType,
+                    requiresSecureDecoder,
+                    requiresTunnelingDecoder
+                )
+            }.getOrDefault(emptyList())
+        }
         if (preferSoftwareForAllCodecs ||
             mimeType == MimeTypes.VIDEO_MP4V ||
             mimeType == MimeTypes.VIDEO_DIVX ||
@@ -310,10 +387,10 @@ fun createXvidAwareMediaCodecSelector(
             mimeType.contains("xvid", ignoreCase = true) ||
             mimeType.contains("divx", ignoreCase = true)
         ) {
-            // Put software decoders first for legacy packed-B-frame/Xvid/DivX/FLV streams
+            // Put software decoders first for SW fallback or legacy packed-B-frame/Xvid/DivX/FLV streams
             decoders.sortedBy { info: MediaCodecInfo -> info.hardwareAccelerated }
         } else {
-            // Keep hardware-accelerated decoders first for H.264/HEVC/VP9/AV1 to minimize CPU & battery drain
+            // Keep hardware-accelerated decoders first for H.264/HEVC/VP9/AV1/AAC/Opus to minimize CPU & battery drain
             decoders.sortedByDescending { info: MediaCodecInfo -> info.hardwareAccelerated }
         }
     }
@@ -468,11 +545,44 @@ fun isSubtitleOrTextTrackPlaybackError(
     val causeClassName = error.cause?.javaClass?.name.orEmpty()
     return causeTrace.contains("extractor.text") ||
         causeTrace.contains("androidx.media3.extractor.text") ||
+        causeTrace.contains("SubtitleTranscoding", ignoreCase = true) ||
+        causeTrace.contains("SsaParser", ignoreCase = true) ||
+        causeTrace.contains("text.ssa", ignoreCase = true) ||
         causeClassName.contains("SubtitleDecoderException", ignoreCase = true) ||
         causeClassName.contains("SubripParser", ignoreCase = true) ||
+        causeClassName.contains("SsaParser", ignoreCase = true) ||
         causeMessage.contains("Legacy decoding is disabled", ignoreCase = true) ||
         errorMessage.contains("Legacy decoding is disabled", ignoreCase = true) ||
+        causeMessage.contains("S_TEXT/ASS", ignoreCase = true) ||
+        causeMessage.contains("S_TEXT/SSA", ignoreCase = true) ||
         (causeClassName.contains("ParserException") && causeTrace.contains("text."))
+}
+
+/**
+ * Identifies hardware decoder (e.g., 1080p HEVC MediaCodec) or audio sink (AAC/Opus AudioTrack)
+ * playback errors that should automatically recover via software/FFmpeg decoder fallback without crashing.
+ */
+@OptIn(UnstableApi::class)
+fun isRecoverableDecoderOrAudioSinkError(error: PlaybackException): Boolean {
+    return when (error.errorCode) {
+        PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+        PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FAILED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+        PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+        PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED,
+        PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED -> true
+        else -> {
+            val msg = (error.message.orEmpty() + " " + error.cause?.message.orEmpty()).lowercase()
+            msg.contains("mediacodec") ||
+                msg.contains("decoder") ||
+                msg.contains("hevc") ||
+                msg.contains("opus") ||
+                msg.contains("audiotrack")
+        }
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -486,32 +596,33 @@ fun handleNonFatalSubtitleErrorIfApplicable(
         return false
     }
 
-    try {
+    runCatching {
         Toast.makeText(
             context,
-            "Subtitle file is unsupported or corrupted. Continuing video without subtitles.",
+            "Subtitle track is unsupported or corrupted. Continuing video smoothly without subtitles.",
             Toast.LENGTH_SHORT
         ).show()
-    } catch (_: Exception) {
     }
 
-    // Disable text track and resume video at the exact same position
-    val pos = player.currentPosition.coerceAtLeast(0L)
-    val item = player.currentMediaItem
-    player.trackSelectionParameters = player.trackSelectionParameters
-        .buildUpon()
-        .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-        .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-        .build()
-
-    if (item != null) {
-        // Strip broken external subtitles if external subtitle loading failed
-        val cleanItem = item.buildUpon()
-            .setSubtitleConfigurations(emptyList())
+    // Disable text track and resume video at the exact same position safely
+    runCatching {
+        val pos = player.currentPosition.coerceAtLeast(0L)
+        val item = player.currentMediaItem
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
             .build()
-        player.setMediaItem(cleanItem, pos)
-        player.prepare()
-        player.play()
+
+        if (item != null) {
+            // Strip broken external subtitles if external subtitle loading failed
+            val cleanItem = item.buildUpon()
+                .setSubtitleConfigurations(emptyList())
+                .build()
+            player.setMediaItem(cleanItem, pos)
+            player.prepare()
+            player.play()
+        }
     }
     onSubtitleDisabled?.invoke()
     return true

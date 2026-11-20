@@ -149,13 +149,15 @@ object CyosPlayerHolder {
 
             val safePlaylist = if (playlist.isNotEmpty()) playlist else listOf(mediaItem)
             val safeIndex = currentIndex.coerceIn(0, safePlaylist.lastIndex)
-            val uris = safePlaylist.mapNotNull { it.localConfiguration?.uri }
-            if (uris != lastSubmittedUris) {
+            val startIdx = (safeIndex - 1).coerceAtLeast(0)
+            val endIdx = (safeIndex + 1).coerceAtMost(safePlaylist.lastIndex)
+            val windowUris = (startIdx..endIdx).mapNotNull { safePlaylist[it].localConfiguration?.uri }
+            if (windowUris != lastSubmittedUris) {
                 session.preloadManager.reset()
-                safePlaylist.forEachIndexed { idx, item ->
-                    session.preloadManager.add(item, idx)
+                for (idx in startIdx..endIdx) {
+                    session.preloadManager.add(safePlaylist[idx], idx)
                 }
-                lastSubmittedUris = uris
+                lastSubmittedUris = windowUris
             }
             session.statusControl.currentPlayingIndex = safeIndex
             session.preloadManager.setCurrentPlayingIndex(safeIndex)

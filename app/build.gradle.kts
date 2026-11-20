@@ -12,8 +12,8 @@ android {
         applicationId = "com.cyosplay.player"
         minSdk = 24
         targetSdk = 36
-        versionCode = 45
-        versionName = "1.08rv3"
+        versionCode = 46
+        versionName = "1.08rv4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MAJOR_CAPABILITY_ID", "\"cyos play\"")
@@ -117,6 +117,9 @@ dependencies {
 
 afterEvaluate {
     listOf(
+        "CyosPlay-v1.08rv3-release-signed-apk.zip",
+        "CyosPlay-v1.08rv3-release-signed.apk",
+        "cyosplay-1.08rv3-release.apk",
         "CyosPlay-v1.08rv2-release-signed-apk.zip",
         "CyosPlay-v1.08rv2-release-signed.apk",
         "cyosplay-1.08rv2-release.apk",

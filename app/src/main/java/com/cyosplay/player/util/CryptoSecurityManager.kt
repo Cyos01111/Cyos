@@ -110,6 +110,7 @@ object CryptoSecurityManager {
     const val RELEASE_KEYSTORE_PASSWORD_V107RV8A_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
     const val RELEASE_KEYSTORE_PASSWORD_V108RV2_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
     const val RELEASE_KEYSTORE_PASSWORD_V108RV3_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
+    const val RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
     const val RELEASE_KEYSTORE_PASSWORD_V107RV_ALT_SPEC = "wdwewefeSDFWEFFFR#@#@$$&|?><@$23"
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV2_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
@@ -125,6 +126,7 @@ object CryptoSecurityManager {
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8A_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV2_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV3_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
     const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_ALT_SPEC = "Qwer./,;'357!#@%%%$#adsdfrgrgAeg;..,:\"{}|"
     const val MASTER_PASSWORD_LOCKED_SPEC = "a12@ #$%DQWaA2-=d,q./qweAS"
     private const val KEY_DATA_CODES_LOCKED = "zk_data_codes_locked_master_pw"
@@ -143,6 +145,7 @@ object CryptoSecurityManager {
     private const val KEY_ENCRYPTED_KEYSTORE_PW_V107RV8A_TOKEN = "zk_encrypted_keystore_pw_token_v107rv8a"
     private const val KEY_ENCRYPTED_KEYSTORE_PW_V108RV2_TOKEN = "zk_encrypted_keystore_pw_token_v108rv2"
     private const val KEY_ENCRYPTED_KEYSTORE_PW_V108RV3_TOKEN = "zk_encrypted_keystore_pw_token_v108rv3"
+    private const val KEY_ENCRYPTED_KEYSTORE_PW_V108RV4_TOKEN = "zk_encrypted_keystore_pw_token_v108rv4"
     private const val KEY_ENCRYPTED_BUILD_PW_TOKEN = "zk_encrypted_build_pw_token_v107rv"
     private const val KEY_ENCRYPTED_JAR_PW_TOKEN = "zk_encrypted_jar_pw_token_v107rv"
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V106RV13_TOKEN = "zk_encrypted_jar_build_pw_v106rv13"
@@ -165,6 +168,7 @@ object CryptoSecurityManager {
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V107RV8A_TOKEN = "zk_encrypted_jar_build_pw_v107rv8a"
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V108RV2_TOKEN = "zk_encrypted_jar_build_pw_v108rv2"
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V108RV3_TOKEN = "zk_encrypted_jar_build_pw_v108rv3"
+    private const val KEY_ENCRYPTED_JAR_BUILD_PW_V108RV4_TOKEN = "zk_encrypted_jar_build_pw_v108rv4"
 
     // V4-32 invisible XOR shards reconstructing the 32-char build code encryption password ("W23@#$*adsgbfggQWEFGEF13454ehger")
     private val V4_BUILD_SHARD_A = byteArrayOf(
@@ -2836,6 +2840,63 @@ object CryptoSecurityManager {
             val innerBase64 = outerUnwrapped.removePrefix("JAR_BUILD_V108RV3:")
             val innerCipher = Base64.decode(innerBase64, Base64.NO_WRAP)
             val jarKek = deriveJarBuildCodePasswordV108rv3Kek(context)
+            val plainBytes = decryptBytesWithKey(innerCipher, jarKek) ?: return null
+            String(plainBytes, StandardCharsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    @Synchronized
+    fun getOrCreateEncryptedKeystorePasswordV108rv4Token(context: Context): String {
+        val prefs = getKeystorePrefs(context)
+        val existing = prefs.getString(KEY_ENCRYPTED_KEYSTORE_PW_V108RV4_TOKEN, null)
+        if (!existing.isNullOrBlank() && decryptVideoDatacode(context, existing) == RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC) {
+            return existing
+        }
+        val token = encryptVideoDatacode(context, RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC)
+        prefs.edit().putString(KEY_ENCRYPTED_KEYSTORE_PW_V108RV4_TOKEN, token).commit()
+        return token
+    }
+
+    @Synchronized
+    fun getOrCreateEncryptedJarBuildCodePasswordV108rv4Token(context: Context): String {
+        val prefs = getKeystorePrefs(context)
+        val existing = prefs.getString(KEY_ENCRYPTED_JAR_BUILD_PW_V108RV4_TOKEN, null)
+        if (!existing.isNullOrBlank() && decryptVideoDatacode(context, existing) == JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC) {
+            return existing
+        }
+        val token = encryptVideoDatacode(context, JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC)
+        prefs.edit().putString(KEY_ENCRYPTED_JAR_BUILD_PW_V108RV4_TOKEN, token).commit()
+        return token
+    }
+
+    fun deriveJarBuildCodePasswordV108rv4Kek(context: Context): SecretKey {
+        return deriveJarBuildCodePasswordV107rvKek(context)
+    }
+
+    @Synchronized
+    fun encryptBuildCodeWithJarPasswordV108rv4(context: Context, rawPayload: String): String {
+        val jarKek = deriveJarBuildCodePasswordV108rv4Kek(context)
+        val innerEncrypted = encryptBytesWithKey(
+            rawPayload.toByteArray(StandardCharsets.UTF_8),
+            jarKek
+        )
+        val outerBase64 = Base64.encodeToString(innerEncrypted, Base64.NO_WRAP)
+        return encryptString(context, "JAR_BUILD_V108RV4:$outerBase64")
+    }
+
+    @Synchronized
+    fun decryptBuildCodeWithJarPasswordV108rv4(context: Context, encryptedPayload: String?): String? {
+        if (encryptedPayload.isNullOrBlank()) return null
+        val outerUnwrapped = decryptString(context, encryptedPayload) ?: return null
+        if (!outerUnwrapped.startsWith("JAR_BUILD_V108RV4:")) {
+            return outerUnwrapped
+        }
+        return try {
+            val innerBase64 = outerUnwrapped.removePrefix("JAR_BUILD_V108RV4:")
+            val innerCipher = Base64.decode(innerBase64, Base64.NO_WRAP)
+            val jarKek = deriveJarBuildCodePasswordV108rv4Kek(context)
             val plainBytes = decryptBytesWithKey(innerCipher, jarKek) ?: return null
             String(plainBytes, StandardCharsets.UTF_8)
         } catch (_: Exception) {

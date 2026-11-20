@@ -91,6 +91,7 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     var showUnifiedThemeTypographyDialog by remember { mutableStateOf(false) }
+    var showLicensesPopupDialog by remember { mutableStateOf(false) }
     var expandedThirdPartyNoticeId by remember { mutableStateOf<String?>(null) }
     var wipeConfirmationStep by remember { mutableIntStateOf(0) }
 
@@ -635,85 +636,16 @@ fun SettingsScreen(
                             )
                         }
                     }
-                    Surface(
-                        color = AmberGold.copy(alpha = 0.16f),
-                        shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, AmberGold.copy(alpha = 0.45f))
-                    ) {
-                        Text(
-                            text = OpenSourceLicenses.APP_LICENSE_POSTURE,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = AmberGold,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                }
-
-                // CyosPlay Proprietary Copyright Block
-                Surface(
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.65f),
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.28f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("about_us_copyright_card")
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = uiState.aboutUsCopyright,
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.testTag("about_us_copyright_text")
-                        )
-                        Text(
-                            text = OpenSourceLicenses.APP_PROPRIETARY_NOTICE,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f))
-
-                // Third-Party Open Source Licenses Attribution Section
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        text = OpenSourceLicenses.THIRD_PARTY_OSS_TITLE,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = OpenSourceLicenses.THIRD_PARTY_OSS_DISCLAIMER,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.testTag("third_party_oss_disclaimer_text")
-                    )
                 }
 
                 OutlinedButton(
-                    onClick = {
-                        runCatching {
-                            OssLicensesMenuActivity.setActivityTitle(OpenSourceLicenses.THIRD_PARTY_OSS_TITLE)
-                            val ossIntent = Intent(context, OssLicensesMenuActivity::class.java).apply {
-                                if (context !is Activity) {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                            }
-                            context.startActivity(ossIntent)
-                        }
-                    },
+                    onClick = { showLicensesPopupDialog = true },
                     border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.55f)),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
-                        .testTag("about_us_open_source_licenses_button")
+                        .testTag("about_us_licenses_popup_button")
                 ) {
                     Icon(
                         imageVector = Icons.Default.Description,
@@ -723,35 +655,55 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Open Source Licenses (Google OSS)",
+                        text = "Licenses & Legal",
                         style = MaterialTheme.typography.labelLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
+            }
+        }
+    }
 
-                // Inline Expandable Notices for AndroidX Media3 ExoPlayer (Apache 2.0) & FFmpeg (LGPL v2.1+)
-                OpenSourceLicenses.thirdPartyNotices.forEach { notice ->
-                    val isExpanded = expandedThirdPartyNoticeId == notice.id
+    // Unified Licenses & Legal Popup Modal Dialog (hidden until user taps to show)
+    if (showLicensesPopupDialog) {
+        AlertDialog(
+            onDismissRequest = { showLicensesPopupDialog = false },
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+            modifier = Modifier.testTag("settings_licenses_popup_dialog"),
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Description,
+                        contentDescription = null,
+                        tint = ElectricCyan
+                    )
+                    Text(
+                        text = "Licenses & Legal",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // CyosPlay Proprietary Copyright Block
                     Surface(
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
                         shape = RoundedCornerShape(12.dp),
-                        border = BorderStroke(
-                            1.dp,
-                            if (isExpanded) ElectricCyan.copy(alpha = 0.45f)
-                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.14f)
-                        ),
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.28f)),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 48.dp)
-                            .clickable {
-                                expandedThirdPartyNoticeId = if (isExpanded) null else notice.id
-                            }
-                            .testTag("license_notice_${notice.id}")
+                            .testTag("about_us_copyright_card")
                     ) {
                         Column(
                             modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -759,65 +711,185 @@ fun SettingsScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = notice.libraryName,
+                                    text = uiState.aboutUsCopyright,
                                     style = MaterialTheme.typography.labelLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("about_us_copyright_text")
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
                                 Surface(
-                                    color = ElectricCyan.copy(alpha = 0.14f),
-                                    shape = RoundedCornerShape(6.dp)
+                                    color = AmberGold.copy(alpha = 0.16f),
+                                    shape = RoundedCornerShape(6.dp),
+                                    border = BorderStroke(1.dp, AmberGold.copy(alpha = 0.45f))
                                 ) {
                                     Text(
-                                        text = notice.licenseType,
+                                        text = OpenSourceLicenses.APP_LICENSE_POSTURE,
                                         style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = ElectricCyan,
+                                        fontWeight = FontWeight.Bold,
+                                        color = AmberGold,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Icon(
-                                    imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                    contentDescription = if (isExpanded) "Collapse ${notice.libraryName} notice" else "Expand ${notice.libraryName} notice",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(20.dp)
-                                )
                             }
                             Text(
-                                text = "${notice.copyright} • ${notice.version}",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = OpenSourceLicenses.APP_PROPRIETARY_NOTICE,
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            AnimatedVisibility(
-                                visible = isExpanded,
-                                enter = expandVertically() + fadeIn(),
-                                exit = shrinkVertically() + fadeOut()
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f))
+
+                    // Third-Party Open Source Licenses Attribution Section
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = OpenSourceLicenses.THIRD_PARTY_OSS_TITLE,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = OpenSourceLicenses.THIRD_PARTY_OSS_DISCLAIMER,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("third_party_oss_disclaimer_text")
+                        )
+                    }
+
+                    // Expandable Notices for AndroidX Media3 ExoPlayer (Apache 2.0) & FFmpeg (LGPL v2.1+)
+                    OpenSourceLicenses.thirdPartyNotices.forEach { notice ->
+                        val isExpanded = expandedThirdPartyNoticeId == notice.id
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isExpanded) ElectricCyan.copy(alpha = 0.45f)
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.14f)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 48.dp)
+                                .clickable {
+                                    expandedThirdPartyNoticeId = if (isExpanded) null else notice.id
+                                }
+                                .testTag("license_notice_${notice.id}")
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(top = 6.dp),
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f)
-                                    )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Text(
-                                        text = notice.summary,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface
+                                        text = notice.libraryName,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    Text(
-                                        text = notice.licenseText,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        color = ElectricCyan.copy(alpha = 0.14f),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text(
+                                            text = notice.licenseType,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = ElectricCyan,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                        contentDescription = if (isExpanded) "Collapse ${notice.libraryName} notice" else "Expand ${notice.libraryName} notice",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(20.dp)
                                     )
+                                }
+                                Text(
+                                    text = "${notice.copyright} • ${notice.version}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                AnimatedVisibility(
+                                    visible = isExpanded,
+                                    enter = expandVertically() + fadeIn(),
+                                    exit = shrinkVertically() + fadeOut()
+                                ) {
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(top = 6.dp),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.16f)
+                                        )
+                                        Text(
+                                            text = notice.summary,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = notice.licenseText,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                OssLicensesMenuActivity.setActivityTitle(OpenSourceLicenses.THIRD_PARTY_OSS_TITLE)
+                                val ossIntent = Intent(context, OssLicensesMenuActivity::class.java).apply {
+                                    if (context !is Activity) {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                }
+                                context.startActivity(ossIntent)
+                            }
+                        },
+                        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.55f)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 48.dp)
+                            .testTag("about_us_open_source_licenses_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Description,
+                            contentDescription = null,
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Open Source Licenses (Google OSS)",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showLicensesPopupDialog = false },
+                    modifier = Modifier.testTag("settings_licenses_popup_close_button")
+                ) {
+                    Text("Close")
                 }
             }
-        }
+        )
     }
 
     // Unified Theme & Typography Dialog (One Place Setting)

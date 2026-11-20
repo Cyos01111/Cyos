@@ -18,8 +18,8 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
     description = "Validates release APK JAR/APK signatures against cyosplay-release.keystore and verifies AES-256-GCM encrypted release artifact integrity."
 
     doLast {
-        val releaseVersionName = "1.08rv3"
-        val releaseVersionCode = 45
+        val releaseVersionName = "1.08rv4"
+        val releaseVersionCode = 46
         val releaseKeyAlias = "cyosplay_release"
         val releaseKeystorePassword = "wdwewefeSDFWEFFFR#@#@&|?><@"
         val buildCodeEncryptionPassword = "#adsdfrgrgAeg;..,:\"{}|"
