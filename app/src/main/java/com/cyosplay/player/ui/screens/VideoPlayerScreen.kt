@@ -279,6 +279,8 @@ fun VideoPlayerScreen(
     var hasAutoSkippedIntroForCurrentVideo by remember(activeVideo.path) { mutableStateOf(false) }
     var hasAutoSkippedCreditsForCurrentVideo by remember(activeVideo.path) { mutableStateOf(false) }
     var lastDoubleTapSeekElapsedMs by remember { mutableLongStateOf(0L) }
+    var lastDoubleTapTapElapsedMs by remember { mutableLongStateOf(0L) }
+    var doubleTapCumulativeDeltaMs by remember { mutableLongStateOf(0L) }
 
     LaunchedEffect(
         controlsVisible,
@@ -1332,12 +1334,12 @@ fun VideoPlayerScreen(
                                         holdSlideAnchorSpeed = holdSpeedMultiplier
                                     }
                                     val dx = activePointer.position.x - anchorX
-                                    val stepWidthPx = (size.width / 5f).coerceAtLeast(48f)
-                                    val stepDelta = (dx / stepWidthPx).roundToInt()
-                                    val targetSpeed = (holdSlideAnchorSpeed + stepDelta)
-                                        .coerceIn(1.0f, 5.0f)
-                                        .roundToInt()
-                                        .toFloat()
+                                    val targetSpeed = PlayerGestureControlHelper.computeHoldSkipSpeedStep(
+                                        startHoldSpeed = holdSlideAnchorSpeed,
+                                        totalDxPx = dx,
+                                        containerWidthPx = size.width.toFloat(),
+                                        currentHoldSpeed = holdSpeedMultiplier
+                                    )
                                     if (targetSpeed != holdSpeedMultiplier) {
                                         holdSpeedMultiplier = targetSpeed
                                     }
@@ -1547,28 +1549,40 @@ fun VideoPlayerScreen(
                         if (canDoubleTapSkip && activeGestureLock == PlayerGestureLock.NONE) {
                             registerUserInteraction()
                             val isLeft = offset.x < size.width / 2f
-                            // Debounce rapid double-tap seeks with CLOSEST_SYNC to prevent decoder queue spikes, CPU load & battery drain
-                            val target = if (nowElapsed - lastDoubleTapSeekElapsedMs >= 160L) {
+                            val skipCalc = PlayerGestureControlHelper.computeDoubleTapCumulativeSkip(
+                                currentPositionMs = currentPositionMs,
+                                totalDurationMs = totalDurationMs,
+                                isLeftHalf = isLeft,
+                                previousDoubleTapElapsedMs = lastDoubleTapTapElapsedMs,
+                                previousHardwareSeekElapsedMs = lastDoubleTapSeekElapsedMs,
+                                nowElapsedMs = nowElapsed,
+                                previousCumulativeDeltaMs = doubleTapCumulativeDeltaMs
+                            )
+                            lastDoubleTapTapElapsedMs = nowElapsed
+                            doubleTapCumulativeDeltaMs = skipCalc.cumulativeDeltaMs
+                            // Coalesce rapid double-tap seeks with CLOSEST_SYNC to prevent decoder queue spikes, CPU load & battery drain
+                            val target = if (skipCalc.shouldDispatchPlayerSeek) {
                                 lastDoubleTapSeekElapsedMs = nowElapsed
+                                exoPlayer.setSeekParameters(SeekParameters.CLOSEST_SYNC)
                                 exoPlayer.playWhenReady = true
-                                val seeked = if (isLeft) {
-                                    com.cyos.player.CyosFastPlayerManager.skipBackward10s(exoPlayer)
-                                } else {
-                                    com.cyos.player.CyosFastPlayerManager.skipForward10s(exoPlayer)
-                                }
+                                exoPlayer.seekTo(skipCalc.targetPositionMs)
                                 if (!exoPlayer.isPlaying) {
                                     exoPlayer.play()
                                 }
-                                seeked
+                                skipCalc.targetPositionMs
                             } else {
-                                val delta = if (isLeft) -10_000L else 10_000L
-                                (currentPositionMs + delta).coerceIn(0L, totalDurationMs)
+                                skipCalc.targetPositionMs
                             }
                             currentPositionMs = target
                             isPlaying = true
+                            if (uiState.isControlsLocked) {
+                                controlsVisible = false
+                            }
                             lastHudUpdateTimestampMs = nowElapsed
                             activeHudType = HudType.SEEK
-                            hudLabelText = if (isLeft) "-10s • ${Formatters.formatDuration(target)}" else "+10s • ${Formatters.formatDuration(target)}"
+                            val cumulativeSec = (skipCalc.cumulativeDeltaMs / 1000L).toInt()
+                            val signLabel = if (cumulativeSec >= 0) "+${cumulativeSec}s" else "${cumulativeSec}s"
+                            hudLabelText = "$signLabel • ${Formatters.formatDuration(target)}"
                         } else if (uiState.isControlsLocked) {
                             lockedButtonVisible = true
                         }

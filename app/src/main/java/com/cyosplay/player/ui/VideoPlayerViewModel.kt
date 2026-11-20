@@ -89,8 +89,8 @@ enum class MiniPlayerSizeMode {
 }
 
 data class VideoPlayerUiState(
-    val appVersionName: String = "1.08rv",
-    val appDescription: String = "CyosPlay 1.08rv",
+    val appVersionName: String = "1.08rv3",
+    val appDescription: String = "CyosPlay 1.08rv3",
     val aboutUsCreator: String = "Created by Tkm",
     val aboutUsCopyright: String = "© 2026 TKm. All rights reserved.",
     val currentNavTab: NavDestination = NavDestination.FOLDERS,

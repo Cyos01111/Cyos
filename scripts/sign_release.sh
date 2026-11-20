@@ -4,7 +4,7 @@ set -euo pipefail
 echo "Building and verifying signed release APK via Gradle (assembleRelease + verifyReleaseSignatureAndEncryption)..."
 gradle :app:assembleRelease
 
-ROOT_SIGNED_APK="CyosPlay-v1.08rv-release-signed.apk"
+ROOT_SIGNED_APK="CyosPlay-v1.08rv3-release-signed.apk"
 INTEGRITY_ENVELOPE="app/build/outputs/apk/release/release-integrity.enc"
 
 if [ ! -f "$ROOT_SIGNED_APK" ] || [ ! -f "$INTEGRITY_ENVELOPE" ]; then

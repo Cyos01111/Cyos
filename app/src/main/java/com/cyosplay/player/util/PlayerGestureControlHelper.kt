@@ -232,6 +232,49 @@ object PlayerGestureControlHelper {
             !isHoldFastForwardActive
     }
 
+    data class DoubleTapSkipCalculation(
+        val targetPositionMs: Long,
+        val cumulativeDeltaMs: Long,
+        val shouldDispatchPlayerSeek: Boolean
+    )
+
+    /**
+     * Computes a smooth, low-CPU/low-battery cumulative double-tap seek target (±10s per double-tap,
+     * accumulating across consecutive double-taps in the same direction within 680ms) and throttles
+     * hardware decoder seek dispatches to 150ms intervals.
+     */
+    fun computeDoubleTapCumulativeSkip(
+        currentPositionMs: Long,
+        totalDurationMs: Long,
+        isLeftHalf: Boolean,
+        previousDoubleTapElapsedMs: Long,
+        previousHardwareSeekElapsedMs: Long,
+        nowElapsedMs: Long,
+        previousCumulativeDeltaMs: Long,
+        stepDurationMs: Long = 10_000L
+    ): DoubleTapSkipCalculation {
+        val safeDuration = totalDurationMs.coerceAtLeast(1_000L)
+        val safeCurrent = currentPositionMs.coerceIn(0L, safeDuration)
+        val signedStep = if (isLeftHalf) -stepDurationMs else stepDurationMs
+        val isContinuingStreak = previousDoubleTapElapsedMs > 0L &&
+            (nowElapsedMs - previousDoubleTapElapsedMs) in 0L..680L &&
+            ((previousCumulativeDeltaMs < 0L && signedStep < 0L) ||
+                (previousCumulativeDeltaMs > 0L && signedStep > 0L))
+        val updatedCumulativeDelta = if (isContinuingStreak) {
+            previousCumulativeDeltaMs + signedStep
+        } else {
+            signedStep
+        }
+        val targetPosition = (safeCurrent + signedStep).coerceIn(0L, safeDuration)
+        val shouldDispatch = previousHardwareSeekElapsedMs <= 0L ||
+            (nowElapsedMs - previousHardwareSeekElapsedMs) >= 150L
+        return DoubleTapSkipCalculation(
+            targetPositionMs = targetPosition,
+            cumulativeDeltaMs = updatedCumulativeDelta,
+            shouldDispatchPlayerSeek = shouldDispatch
+        )
+    }
+
     /**
      * Guarantees brightness remains completely unchanged when zooming or performing non-brightness gestures:
      * Whenever multi-touch (`activePointerCount > 1`), `isPinchZoomActive`, `recentlyPinched`,

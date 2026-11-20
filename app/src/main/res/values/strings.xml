@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">CyosPlay</string>
-    <string name="app_version">1.08rv</string>
-    <string name="app_description">CyosPlay 1.08rv</string>
+    <string name="app_version">1.08rv3</string>
+    <string name="app_description">CyosPlay 1.08rv3</string>
     <string name="about_us_title">About Us</string>
-    <string name="about_us_description">CyosPlay 1.08rv</string>
+    <string name="about_us_description">CyosPlay 1.08rv3</string>
     <string name="about_us_creator">Created by Tkm</string>
     <string name="about_us_copyright">© 2026 TKm. All rights reserved.</string>
     <string name="about_us_closed_source_badge">Closed-Source</string>

@@ -239,24 +239,8 @@ open class MainActivity : FragmentActivity() {
             }
 
             LaunchedEffect(Unit) {
-                val permissionsToRequest = when {
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
-                        Manifest.permission.READ_MEDIA_VIDEO,
-                        Manifest.permission.READ_MEDIA_AUDIO,
-                        Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
-                    )
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-                        Manifest.permission.READ_MEDIA_VIDEO,
-                        Manifest.permission.READ_MEDIA_AUDIO
-                    )
-                    Build.VERSION.SDK_INT <= Build.VERSION_CODES.P -> arrayOf(
-                        Manifest.permission.READ_EXTERNAL_STORAGE,
-                        Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    )
-                    else -> arrayOf(
-                        Manifest.permission.READ_EXTERNAL_STORAGE
-                    )
-                }
+                val permissionsToRequest = com.cyosplay.player.util.AndroidVersionCompatHelper
+                    .resolveRuntimeMediaPermissions(Build.VERSION.SDK_INT)
                 try {
                     permissionLauncher.launch(permissionsToRequest)
                 } catch (_: Exception) {
@@ -297,15 +281,16 @@ open class MainActivity : FragmentActivity() {
      * in a floating window while using other applications.
      */
     fun enterVideoPipMode(videoWidth: Int = 1920, videoHeight: Int = 1080): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        if (!com.cyosplay.player.util.AndroidVersionCompatHelper.canEnterPictureInPicture(Build.VERSION.SDK_INT)) {
+            return false
+        }
         return try {
-            val safeW = videoWidth.coerceAtLeast(16)
-            val safeH = videoHeight.coerceAtLeast(9)
-            val ratioFloat = (safeW.toFloat() / safeH.toFloat()).coerceIn(0.42f, 2.39f)
-            val rational = Rational((ratioFloat * 1000).toInt(), 1000)
+            val (num, den) = com.cyosplay.player.util.AndroidVersionCompatHelper
+                .clampPipAspectRatioRational(videoWidth, videoHeight)
+            val rational = Rational(num, den)
             val builder = PictureInPictureParams.Builder()
                 .setAspectRatio(rational)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (com.cyosplay.player.util.AndroidVersionCompatHelper.supportsSeamlessAutoPip(Build.VERSION.SDK_INT)) {
                 builder.setAutoEnterEnabled(viewModel.uiState.value.autoPipEnabled)
                 builder.setSeamlessResizeEnabled(true)
             }
