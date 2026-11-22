@@ -21,12 +21,45 @@ android {
 
     signingConfigs {
         create("release") {
-            val releaseKeystore = rootProject.file("cyosplay-release.keystore")
-            if (releaseKeystore.exists()) {
+            fun resolveReleaseSecret(name: String): String? {
+                val envValue = System.getenv(name)?.trim()
+                if (!envValue.isNullOrEmpty() && !envValue.startsWith("CHANGE_ME_")) {
+                    return envValue
+                }
+                val propValue = (project.findProperty(name) as? String)?.trim()
+                if (!propValue.isNullOrEmpty() && !propValue.startsWith("CHANGE_ME_")) {
+                    return propValue
+                }
+                val dotEnvFile = rootProject.file(".env")
+                if (dotEnvFile.isFile) {
+                    val line = dotEnvFile.readLines()
+                        .asSequence()
+                        .map { it.trim() }
+                        .firstOrNull { it.isNotEmpty() && !it.startsWith("#") && it.startsWith("$name=") }
+                    if (line != null) {
+                        val raw = line.substringAfter("=").trim().removeSurrounding("\"").removeSurrounding("'")
+                        if (raw.isNotEmpty() && !raw.startsWith("CHANGE_ME_")) {
+                            return raw
+                        }
+                    }
+                }
+                return null
+            }
+
+            val releaseKeystorePath = resolveReleaseSecret("CYOSPLAY_RELEASE_KEYSTORE_PATH")
+                ?: "cyosplay-release.keystore"
+            val releaseKeyAlias = resolveReleaseSecret("CYOSPLAY_RELEASE_KEY_ALIAS")
+                ?: "cyosplay_release"
+            val releaseStorePass = resolveReleaseSecret("CYOSPLAY_RELEASE_STORE_PASSWORD")
+            val releaseKeyPass = resolveReleaseSecret("CYOSPLAY_RELEASE_KEY_PASSWORD")
+                ?: releaseStorePass
+            val releaseKeystore = rootProject.file(releaseKeystorePath)
+
+            if (releaseKeystore.exists() && !releaseStorePass.isNullOrBlank() && !releaseKeyPass.isNullOrBlank()) {
                 storeFile = releaseKeystore
-                storePassword = "wdwewefeSDFWEFFFR#@#@&|?><@"
-                keyAlias = "cyosplay_release"
-                keyPassword = "wdwewefeSDFWEFFFR#@#@&|?><@"
+                storePassword = releaseStorePass
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPass
                 enableV1Signing = true
                 enableV2Signing = true
             } else {
@@ -75,6 +108,12 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true
+            all {
+                it.systemProperty(
+                    "robolectric.dependency.repo.url",
+                    "https://maven-central.storage-download.googleapis.com/maven2"
+                )
+            }
         }
     }
 }

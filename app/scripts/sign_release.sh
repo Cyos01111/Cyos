@@ -9,10 +9,15 @@ if [ -z "$APKSIGNER" ]; then
     exit 1
 fi
 
-KEYSTORE_PATH="cyosplay-release.keystore"
-KEY_ALIAS="cyosplay_release"
-STORE_PASS="cyosplay2026"
-KEY_PASS="cyosplay2026"
+KEYSTORE_PATH="${CYOSPLAY_RELEASE_KEYSTORE_PATH:-cyosplay-release.keystore}"
+KEY_ALIAS="${CYOSPLAY_RELEASE_KEY_ALIAS:-cyosplay_release}"
+
+if [ -z "${CYOSPLAY_RELEASE_STORE_PASSWORD:-}" ]; then
+    echo "Error: CYOSPLAY_RELEASE_STORE_PASSWORD environment variable must be set (never hardcode keystore passwords)."
+    exit 1
+fi
+
+export CYOSPLAY_RELEASE_KEY_PASSWORD="${CYOSPLAY_RELEASE_KEY_PASSWORD:-$CYOSPLAY_RELEASE_STORE_PASSWORD}"
 
 INPUT_APK="${1:-app/build/outputs/apk/release/app-release.apk}"
 OUTPUT_APK="${2:-app/build/outputs/apk/release/cyosplay-release-signed.apk}"
@@ -26,8 +31,8 @@ echo "Signing $INPUT_APK with $KEYSTORE_PATH ($KEY_ALIAS)..."
 "$APKSIGNER" sign \
     --ks "$KEYSTORE_PATH" \
     --ks-key-alias "$KEY_ALIAS" \
-    --ks-pass "pass:$STORE_PASS" \
-    --key-pass "pass:$KEY_PASS" \
+    --ks-pass "env:CYOSPLAY_RELEASE_STORE_PASSWORD" \
+    --key-pass "env:CYOSPLAY_RELEASE_KEY_PASSWORD" \
     --v1-signing-enabled true \
     --v2-signing-enabled true \
     --v3-signing-enabled true \

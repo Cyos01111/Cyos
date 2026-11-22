@@ -1,0 +1,38 @@
+# Environment & local secrets (NEVER commit real keystore passwords or secrets to GitHub)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Release signing keystores & private keys (keep template debug keystore only)
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pk8
+*.pem
+*.key
+cyosplay-release.keystore
+!debug.keystore
+!debug.keystore.base64
+
+# Built Android packages & release integrity artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+release-integrity.enc
+.build-outputs/
+
+# Gradle & IDE build caches
+.gradle/
+build/
+app/build/
+.kotlin/
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+.DS_Store

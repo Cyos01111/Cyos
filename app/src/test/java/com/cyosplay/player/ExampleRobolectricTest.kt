@@ -1333,8 +1333,10 @@ class ExampleRobolectricTest {
             viewModel.uiState.value.lowRamShieldEnabled
         )
 
-        // 2. Build code & datacode encryption with password "W23@#$*adsgbfggQWEFGEF13454ehger"
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched("W23@#$*adsgbfggQWEFGEF13454ehger"))
+        // 2. Build code & datacode encryption with reconstructed local build-code seed
+        val buildSeed = CryptoSecurityManager.reconstructBuildCodeMasterSeed()
+        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(buildSeed))
+        buildSeed.fill('\u0000')
         val rawBuildCode = "BUILD_CODE_V103|CAPABILITY=${com.cyosplay.player.BuildConfig.MAJOR_CAPABILITY_ID}|RES=8K_UHD"
         val encryptedBuildCode = CryptoSecurityManager.encryptVideoDatacode(context, rawBuildCode)
         assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuildCode))
@@ -1751,11 +1753,11 @@ class ExampleRobolectricTest {
         assertTrue(encryptedKeystoreToken.isNotBlank())
         assertTrue(encryptedBuildCodeToken.isNotBlank())
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, encryptedKeystoreToken)
         )
         assertEquals(
-            "W23@#$*adsgbfggQWEFGEF13454ehger",
+            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, encryptedBuildCodeToken)
         )
     }
@@ -1956,11 +1958,11 @@ class ExampleRobolectricTest {
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         val buildCodeToken = CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         assertEquals(
-            "W23@#$*adsgbfggQWEFGEF13454ehger",
+            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, buildCodeToken)
         )
     }
@@ -2056,18 +2058,18 @@ class ExampleRobolectricTest {
         val buildCodeToken = CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(context)
         val jarToken = CryptoSecurityManager.getOrCreateEncryptedJarSignaturePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         assertEquals(
-            "W23@#$*adsgbfggQWEFGEF13454ehger",
+            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, buildCodeToken)
         )
         assertEquals(
-            "4848rhhrhrhHhdhWw÷<$&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_DATA_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarToken)
         )
-        assertTrue(CryptoSecurityManager.isJarDataPasswordMatched("4848rhhrhrhHhdhWw÷<$&^$&÷&÷hdhUuuUU'bccb"))
+        assertTrue(CryptoSecurityManager.isJarDataPasswordMatched(CryptoSecurityManager.JAR_SIGNATURE_DATA_PASSWORD_SPEC))
     }
 
     @Test
@@ -2981,12 +2983,12 @@ class ExampleRobolectricTest {
         // 3. Verify 1.06rv13/1.06rv14 encrypted passwords (Keystore password + JAR/Build Code password)
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         val jarBuildPwToken = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv13Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV13_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwToken)
         )
         val encryptedBuildPayload = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv13(
@@ -3067,12 +3069,12 @@ class ExampleRobolectricTest {
         // 2. Verify 1.06rv14 encrypted passwords and build code encryption
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         val jarBuildPwTokenV14 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv14Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV14)
         )
         val encryptedBuildV14 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv14(
@@ -3083,7 +3085,7 @@ class ExampleRobolectricTest {
             "CYOSPLAY_1.06RV14_ENCRYPTED_BUILD_CODE_AND_DATA",
             CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv14(context, encryptedBuildV14)
         )
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched("W23@#\n&^$&÷&÷hdhUuuUU'bccb"))
+        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC))
     }
 
     @Test
@@ -3175,12 +3177,12 @@ class ExampleRobolectricTest {
         // 3. Verify 1.06rv15 encrypted keystore password and JAR/Build code password
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         val jarBuildPwTokenV15 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv15Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV15_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV15)
         )
         val encryptedBuildV15 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv15(
@@ -3307,12 +3309,12 @@ class ExampleRobolectricTest {
         // 4. Verify 1.06rv16 encrypted keystore password and JAR/Build code password
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         val jarBuildPwTokenV16 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv16Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV16_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV16)
         )
         val encryptedBuildV16 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv16(
@@ -3507,12 +3509,12 @@ class ExampleRobolectricTest {
         // 5. Verify 1.06rv17/1.06rv18 encrypted keystore password and JAR/Build code password
         val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
         )
         val jarBuildPwTokenV17 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv17Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV17_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV17)
         )
         val encryptedBuildV17 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv17(
@@ -3721,12 +3723,12 @@ class ExampleRobolectricTest {
         // 6. Verify 1.06rv18 encrypted keystore password & JAR/Build code password
         val keystoreToken18 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
         assertEquals(
-            "vnjfjvveSDF@!#)*ADF@#Bfgfdh",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken18)
         )
         val jarBuildPwToken18 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv18Token(context)
         assertEquals(
-            "W23@#\n&^$&÷&÷hdhUuuUU'bccb",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV18_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwToken18)
         )
         val encryptedBuild18 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv18(
@@ -3904,12 +3906,12 @@ class ExampleRobolectricTest {
         // 4. Verify 1.07rv encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rvToken(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107)
         )
         val jarBuildToken107 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rvToken(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107)
         )
         val encryptedBuild107 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv(
@@ -4072,12 +4074,12 @@ class ExampleRobolectricTest {
         // 5. Verify 1.07rv2 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv2 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv2Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV2_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv2)
         )
         val jarBuildToken107rv2 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv2Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV2_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv2)
         )
         val encryptedBuild107rv2 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv2(
@@ -4264,12 +4266,12 @@ class ExampleRobolectricTest {
         // 6. Verify 1.07rv3 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv3 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv3Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV3_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv3)
         )
         val jarBuildToken107rv3 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv3Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV3_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv3)
         )
         val encryptedBuild107rv3 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv3(
@@ -4377,12 +4379,12 @@ class ExampleRobolectricTest {
         // 5. Verify 1.07rv4 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv4 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv4Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV4_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv4)
         )
         val jarBuildToken107rv4 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv4Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV4_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv4)
         )
         val encryptedBuild107rv4 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv4(
@@ -4497,12 +4499,12 @@ class ExampleRobolectricTest {
         // 4. Verify 1.07rv5 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv5 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv5Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV5_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv5)
         )
         val jarBuildToken107rv5 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv5Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV5_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv5)
         )
         val encryptedBuild107rv5 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv5(
@@ -4658,12 +4660,12 @@ class ExampleRobolectricTest {
         // 7. Verify 1.07rv6 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv6 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv6Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV6_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv6)
         )
         val jarBuildToken107rv6 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv6Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV6_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv6)
         )
         val encryptedBuild107rv6 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv6(
@@ -4777,12 +4779,12 @@ class ExampleRobolectricTest {
         // 8. Verify 1.07rv7 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV7_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7)
         )
         val jarBuildToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7)
         )
         val encryptedBuild107rv7 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7(
@@ -4817,12 +4819,12 @@ class ExampleRobolectricTest {
 
         val keystoreToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv8Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV8_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv8)
         )
         val jarBuildToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv8Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv8)
         )
         val encryptedBuild107rv8 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv8(
@@ -4951,12 +4953,12 @@ class ExampleRobolectricTest {
         // 5. Verify 1.07rv7a encrypted release keystore password & JAR/Build code encryption
         val keystoreToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7aToken(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV7A_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7a)
         )
         val jarBuildToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7aToken(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7A_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7a)
         )
         val encryptedBuild107rv7a = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7a(
@@ -5128,12 +5130,12 @@ class ExampleRobolectricTest {
         // 6. Verify 1.08rv4 encrypted release keystore password & JAR/Build code encryption
         val keystoreToken108rv4 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV108rv4Token(context)
         assertEquals(
-            "wdwewefeSDFWEFFFR#@#@&|?><@",
+            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken108rv4)
         )
         val jarBuildToken108rv4 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV108rv4Token(context)
         assertEquals(
-            "#adsdfrgrgAeg;..,:\"{}|",
+            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC,
             CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken108rv4)
         )
         val encryptedBuild108rv4 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV108rv4(

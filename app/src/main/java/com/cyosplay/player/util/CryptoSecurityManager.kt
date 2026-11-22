@@ -87,47 +87,47 @@ object CryptoSecurityManager {
     const val STREAM_CHUNK_SIZE = 256 * 1024
 
     const val MAJOR_CAPABILITY_UNIQUE_ID = "cyos play"
-    const val BUILD_CODE_ENCRYPTION_PASSWORD_SPEC = "W23@#$*adsgbfggQWEFGEF13454ehger"
-    const val RELEASE_KEYSTORE_PASSWORD_SPEC = "vnjfjvveSDF@!#)*ADF@#Bfgfdh"
-    const val JAR_SIGNATURE_DATA_PASSWORD_SPEC = "4848rhhrhrhHhdhWw÷<$&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV13_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV15_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV16_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV17_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV18_SPEC = "W23@#\n&^$&÷&÷hdhUuuUU'bccb"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV2_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV3_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV4_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV5_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV6_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV7_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV8_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV7A_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV7B_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V108RV_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV8A_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V108RV2_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V108RV3_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC = "wdwewefeSDFWEFFFR#@#@&|?><@"
-    const val RELEASE_KEYSTORE_PASSWORD_V107RV_ALT_SPEC = "wdwewefeSDFWEFFFR#@#@$$&|?><@$23"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV2_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV3_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV4_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV5_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV6_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7A_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7B_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8A_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV2_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV3_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC = "#adsdfrgrgAeg;..,:\"{}|"
-    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_ALT_SPEC = "Qwer./,;'357!#@%%%$#adsdfrgrgAeg;..,:\"{}|"
+    const val BUILD_CODE_ENCRYPTION_PASSWORD_SPEC = "ENV:CYOSPLAY_LEGACY_BUILD_CODE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val JAR_SIGNATURE_DATA_PASSWORD_SPEC = "ENV:CYOSPLAY_JAR_SIGNATURE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV13_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV15_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV16_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV17_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV18_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_V106"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV2_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV3_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV4_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV5_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV6_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV7_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV8_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV7A_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV7B_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V108RV_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV8A_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V108RV2_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V108RV3_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD"
+    const val RELEASE_KEYSTORE_PASSWORD_V107RV_ALT_SPEC = "ENV:CYOSPLAY_RELEASE_STORE_PASSWORD_ALT"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV2_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV3_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV4_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV5_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV6_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7A_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7B_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8A_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV2_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV3_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD"
+    const val JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_ALT_SPEC = "ENV:CYOSPLAY_BUILD_CODE_PASSWORD_ALT"
     const val MASTER_PASSWORD_LOCKED_SPEC = "a12@ #$%DQWaA2-=d,q./qweAS"
     private const val KEY_DATA_CODES_LOCKED = "zk_data_codes_locked_master_pw"
     private const val KEY_ENCRYPTED_KEYSTORE_PW_TOKEN = "zk_encrypted_keystore_pw_token_v106rv18"
@@ -170,7 +170,7 @@ object CryptoSecurityManager {
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V108RV3_TOKEN = "zk_encrypted_jar_build_pw_v108rv3"
     private const val KEY_ENCRYPTED_JAR_BUILD_PW_V108RV4_TOKEN = "zk_encrypted_jar_build_pw_v108rv4"
 
-    // V4-32 invisible XOR shards reconstructing the 32-char build code encryption password ("W23@#$*adsgbfggQWEFGEF13454ehger")
+    // V4-32 invisible XOR shards reconstructing the 32-char local build-code seed
     private val V4_BUILD_SHARD_A = byteArrayOf(
         0xA5.toByte(), 0x5A.toByte(), 0xC3.toByte(), 0x3C.toByte(), 0x96.toByte(),
         0x69.toByte(), 0x1E.toByte(), 0xE1.toByte(), 0x78.toByte(), 0x87.toByte(),
@@ -507,8 +507,8 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Derives a 256-bit AES Key-Encryption-Key from the 32-char build code encryption password seed
-     * ("W23@#$*adsgbfggQWEFGEF13454ehger") reconstructed from V4 XOR byte shards + device salt.
+     * Derives a 256-bit AES Key-Encryption-Key from the 32-char device build-code seed
+     * reconstructed from V4 XOR byte shards + device salt.
      */
     fun deriveMasterPasswordRootKek(context: Context): SecretKey {
         val prefs = getKeystorePrefs(context)
@@ -564,7 +564,7 @@ object CryptoSecurityManager {
     }
 
     private fun wrapDekWithKeystoreMaster(context: Context, rawDekBytes: ByteArray): ByteArray {
-        // Layer 1: Encrypt DEK with the build code password seed KEK ("W23@#$*adsgbfggQWEFGEF13454ehger")
+        // Layer 1: Encrypt DEK with the local build-code seed KEK
         val passwordKek = deriveMasterPasswordRootKek(context)
         val passwordWrapped = encryptBytesWithKey(rawDekBytes, passwordKek)
 
@@ -1636,7 +1636,7 @@ object CryptoSecurityManager {
 
     /**
      * Decrypts a video technical datacode that was encrypted with [encryptVideoDatacode],
-     * verifying both the outer DEK layer and the inner build-code password ("W23@#$*adsgbfggQWEFGEF13454ehger") KEK layer.
+     * verifying both the outer DEK layer and the inner build-code seed KEK layer.
      */
     @Synchronized
     fun decryptVideoDatacode(context: Context, encryptedDatacode: String?): String? {
@@ -1670,8 +1670,8 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Encrypts and stores both the release keystore password ("vnjfjvveSDF@!#)*ADF@#Bfgfdh")
-     * and the build code password ("W23@#$*adsgbfggQWEFGEF13454ehger") as AES-256-GCM tokens.
+     * Encrypts and stores the release keystore secret reference token and build-code token
+     * as AES-256-GCM tokens (real release signing passwords are supplied via environment secrets only).
      */
     @Synchronized
     fun getOrCreateEncryptedKeystorePasswordToken(context: Context): String {
@@ -1698,8 +1698,7 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Encrypts and stores the JAR signature and datacode password
-     * ("4848rhhrhrhHhdhWw÷<$&^$&÷&÷hdhUuuUU'bccb") as an authenticated AES-256-GCM token.
+     * Encrypts and stores the JAR signature secret reference as an authenticated AES-256-GCM token.
      */
     @Synchronized
     fun getOrCreateEncryptedJarSignaturePasswordToken(context: Context): String {
@@ -1714,8 +1713,8 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Derives a 256-bit AES key from the JAR signature password
-     * ("4848rhhrhrhHhdhWw÷<$&^$&÷&÷hdhUuuUU'bccb") using PBKDF2WithHmacSHA256 and device salt.
+     * Derives a 256-bit AES key from the configured JAR signature secret reference
+     * using PBKDF2WithHmacSHA256 and device salt.
      */
     fun deriveJarSignaturePasswordKek(context: Context): SecretKey {
         val prefs = getKeystorePrefs(context)
@@ -2057,8 +2056,7 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Encrypts and stores the 1.07rv release keystore password ("wdwewefeSDFWEFFFR#@#@&|?><@")
-     * as an authenticated AES-256-GCM token.
+     * Encrypts and stores the 1.07rv release keystore secret reference as an authenticated AES-256-GCM token.
      */
     @Synchronized
     fun getOrCreateEncryptedKeystorePasswordV107rvToken(context: Context): String {
@@ -2073,8 +2071,7 @@ object CryptoSecurityManager {
     }
 
     /**
-     * Encrypts and stores the 1.07rv JAR signature and build code password ("#adsdfrgrgAeg;..,:\"{}|")
-     * as an authenticated AES-256-GCM token.
+     * Encrypts and stores the 1.07rv JAR signature and build-code secret reference as an authenticated AES-256-GCM token.
      */
     @Synchronized
     fun getOrCreateEncryptedJarBuildCodePasswordV107rvToken(context: Context): String {
@@ -2906,8 +2903,7 @@ object CryptoSecurityManager {
 
     /**
      * Generates a compact, deterministic+authenticated encrypted datacode token for a video item,
-     * proving that its stream metadata & build datacodes are protected with the
-     * build password "W23@#$*adsgbfggQWEFGEF13454ehger".
+     * proving that its stream metadata & build datacodes are protected with AES-256-GCM encryption.
      */
     fun generateEncryptedVideoDatacodeToken(
         context: Context,

@@ -18,11 +18,46 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
     description = "Validates release APK JAR/APK signatures against cyosplay-release.keystore and verifies AES-256-GCM encrypted release artifact integrity."
 
     doLast {
+        fun resolveSecret(name: String): String? {
+            val envValue = System.getenv(name)?.trim()
+            if (!envValue.isNullOrEmpty() && !envValue.startsWith("CHANGE_ME_")) {
+                return envValue
+            }
+            val propValue = (project.findProperty(name) as? String)?.trim()
+            if (!propValue.isNullOrEmpty() && !propValue.startsWith("CHANGE_ME_")) {
+                return propValue
+            }
+            val dotEnvFile = rootProject.file(".env")
+            if (dotEnvFile.isFile) {
+                val line = dotEnvFile.readLines()
+                    .asSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.isNotEmpty() && !it.startsWith("#") && it.startsWith("$name=") }
+                if (line != null) {
+                    val raw = line.substringAfter("=").trim().removeSurrounding("\"").removeSurrounding("'")
+                    if (raw.isNotEmpty() && !raw.startsWith("CHANGE_ME_")) {
+                        return raw
+                    }
+                }
+            }
+            return null
+        }
+
         val releaseVersionName = "1.08rv4"
         val releaseVersionCode = 46
-        val releaseKeyAlias = "cyosplay_release"
-        val releaseKeystorePassword = "wdwewefeSDFWEFFFR#@#@&|?><@"
-        val buildCodeEncryptionPassword = "#adsdfrgrgAeg;..,:\"{}|"
+        val releaseKeystorePath = resolveSecret("CYOSPLAY_RELEASE_KEYSTORE_PATH") ?: "cyosplay-release.keystore"
+        val releaseKeyAlias = resolveSecret("CYOSPLAY_RELEASE_KEY_ALIAS") ?: "cyosplay_release"
+        val releaseKeystorePassword = resolveSecret("CYOSPLAY_RELEASE_STORE_PASSWORD")
+            ?: throw GradleException(
+                "Missing CYOSPLAY_RELEASE_STORE_PASSWORD secret. Configure it in the AI Studio Secrets panel, " +
+                    "GitHub Actions Secrets, or a gitignored .env file (never hardcode it in tracked source files)."
+            )
+        val releaseKeyPassword = resolveSecret("CYOSPLAY_RELEASE_KEY_PASSWORD") ?: releaseKeystorePassword
+        val buildCodeEncryptionPassword = resolveSecret("CYOSPLAY_BUILD_CODE_PASSWORD")
+            ?: throw GradleException(
+                "Missing CYOSPLAY_BUILD_CODE_PASSWORD secret. Configure it in the AI Studio Secrets panel, " +
+                    "GitHub Actions Secrets, or a gitignored .env file (never hardcode it in tracked source files)."
+            )
         val envelopeHeader = "CYOSENC1"
         val envelopeAad = "CYOSPLAY_RELEASE_ENVELOPE_V1".toByteArray(StandardCharsets.UTF_8)
 
@@ -30,7 +65,7 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
         val integrityEnvelopeFile = layout.buildDirectory.file("outputs/apk/release/release-integrity.enc").get().asFile
         val rootSignedApk = rootProject.file("CyosPlay-v$releaseVersionName-release-signed.apk")
         val rootReleaseApk = rootProject.file("cyosplay-$releaseVersionName-release.apk")
-        val releaseKeystoreFile = rootProject.file("cyosplay-release.keystore")
+        val releaseKeystoreFile = rootProject.file(releaseKeystorePath)
 
         fun purgeUnverifiedArtifacts() {
             listOf(builtApk, rootSignedApk, rootReleaseApk, integrityEnvelopeFile).forEach { file ->
@@ -107,13 +142,14 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
 
             val expectedCertSha256: String
             val ksPassChars = releaseKeystorePassword.toCharArray()
+            val keyPassChars = releaseKeyPassword.toCharArray()
             try {
                 val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
                 releaseKeystoreFile.inputStream().use { keyStore.load(it, ksPassChars) }
                 if (!keyStore.containsAlias(releaseKeyAlias)) {
                     throw GradleException("Expected release key alias '$releaseKeyAlias' not found in keystore.")
                 }
-                val privateKey = keyStore.getKey(releaseKeyAlias, ksPassChars)
+                val privateKey = keyStore.getKey(releaseKeyAlias, keyPassChars)
                     ?: throw GradleException("Release private key '$releaseKeyAlias' could not be unlocked with configured password.")
                 if (privateKey.encoded == null && privateKey.algorithm.isNullOrBlank()) {
                     throw GradleException("Release private key '$releaseKeyAlias' is invalid.")
@@ -123,6 +159,7 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
                 expectedCertSha256 = sha256Hex(releaseCert.encoded)
             } finally {
                 ksPassChars.fill('\u0000')
+                keyPassChars.fill('\u0000')
             }
 
             // 2a. Validate JAR signature via jarsigner -verify
