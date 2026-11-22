@@ -375,24 +375,6 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     init {
         CryptoSecurityManager.enforcePermanentNonDebugMode(appContext)
         CryptoSecurityManager.getOrCreateDataEncryptionKey(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarSignaturePasswordToken(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv14Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv15Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv16Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv17Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv18Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rvToken(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rvToken(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv2Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv2Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv3Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv3Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv4Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv4Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv5Token(appContext)
-        CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv5Token(appContext)
         loadInitialState()
     }
 
@@ -464,7 +446,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 hasDecoyPin = settingsRepository.hasDecoyVaultPin(),
                 autoKeyRotationCount = CryptoSecurityManager.getAutoRotationCount(appContext),
                 failedCrackAttempts = CryptoSecurityManager.getFailedCrackAttempts(appContext),
-                invisibleSeedVerified = CryptoSecurityManager.verifyInvisibleSeedIntegrity(),
+                invisibleSeedVerified = CryptoSecurityManager.verifyDeviceKeystoreIntegrity(appContext),
                 debugModePermanentlyDisabled = CryptoSecurityManager.isDebugModePermanentlyDisabled(),
                 subtitleFontSize = settingsRepository.getSubtitleFontSize(),
                 subtitleCustomSp = settingsRepository.getSubtitleCustomSp(),
@@ -1442,15 +1424,25 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         _uiState.update { it.copy(showMasterPasswordLockDialog = show, masterPasswordLockErrorMessage = null) }
     }
 
+    fun setDataCodesPasscode(newPasscode: String): Boolean {
+        return CryptoSecurityManager.setDataCodesPasscode(getApplication(), newPasscode)
+    }
+
     fun unlockDataCodesWithMasterPassword(passwordAttempt: String): Boolean {
-        val success = CryptoSecurityManager.unlockDataCodesWithMasterPassword(getApplication(), passwordAttempt)
+        val app = getApplication<Application>()
+        val hasVaultPin = settingsRepository.hasVaultPin()
+        val success = CryptoSecurityManager.unlockDataCodesWithPasscode(
+            context = app,
+            candidatePasscode = passwordAttempt,
+            vaultPinVerifier = if (hasVaultPin) { candidate -> settingsRepository.verifyVaultPin(candidate) } else null
+        )
         if (success) {
             _uiState.update {
                 it.copy(
                     isDataCodesLocked = false,
                     showMasterPasswordLockDialog = false,
                     masterPasswordLockErrorMessage = null,
-                    statusBannerMessage = "Master Password Verified. All Data Codes & Properties Unlocked (AES-256-GCM)."
+                    statusBannerMessage = "Passcode Verified. Data Codes & Properties Unlocked (AES-256-GCM)."
                 )
             }
             _uiState.value.inspectedVideoDetails?.let { current ->
@@ -1460,18 +1452,18 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             }
         } else {
             _uiState.update {
-                it.copy(masterPasswordLockErrorMessage = "Incorrect master password. Codes remain fully locked & encrypted.")
+                it.copy(masterPasswordLockErrorMessage = "Incorrect passcode. Codes remain locked & encrypted.")
             }
         }
         return success
     }
 
     fun lockDataCodesWithMasterPassword() {
-        CryptoSecurityManager.lockDataCodesWithMasterPassword(getApplication())
+        CryptoSecurityManager.lockDataCodes(getApplication())
         _uiState.update {
             it.copy(
                 isDataCodesLocked = true,
-                statusBannerMessage = "Data Codes & Properties Locked with Master Password."
+                statusBannerMessage = "Data Codes & Properties Locked (AES-256-GCM)."
             )
         }
         _uiState.value.inspectedVideoDetails?.let { current ->

@@ -16,7 +16,8 @@ cyosplay-release.keystore
 !debug.keystore
 !debug.keystore.base64
 
-# Built Android packages & release integrity artifacts
+# Exported & built Android packages and release integrity artifacts (never publish to GitHub)
+export/
 *.apk
 *.aab
 *.ap_

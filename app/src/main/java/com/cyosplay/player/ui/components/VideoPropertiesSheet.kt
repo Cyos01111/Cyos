@@ -273,8 +273,8 @@ fun MasterPasswordLockDialog(
                 OutlinedTextField(
                     value = passwordInput,
                     onValueChange = { passwordInput = it },
-                    label = { Text("Master Password") },
-                    placeholder = { Text("Enter master password") },
+                    label = { Text("Device Passcode / Vault PIN") },
+                    placeholder = { Text("Enter passcode or Vault PIN") },
                     singleLine = true,
                     isError = !errorMessage.isNullOrBlank(),
                     visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),

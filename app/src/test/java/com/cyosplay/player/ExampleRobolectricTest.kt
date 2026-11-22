@@ -45,8 +45,8 @@ class ExampleRobolectricTest {
     private val context: Application = ApplicationProvider.getApplicationContext()
 
     @Test
-    fun invisibleMasterPassword_reconstructsAndEncryptsDataAndAutoRotatesOnCrackAttempt() {
-        assertTrue(CryptoSecurityManager.verifyInvisibleSeedIntegrity())
+    fun deviceKeystoreEncryption_encryptsDataAndAutoRotatesOnCrackAttempt() {
+        assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
 
         val secretPayload = "PrivateCinemaVideo_4K_Secret_Token"
         val cipherText = CryptoSecurityManager.encryptString(context, secretPayload)
@@ -558,9 +558,9 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun allDataLayers_encryptedWithMasterPasswordSeed_verified() {
+    fun allDataLayers_encryptedWithDeviceKeystore_verified() {
         // 1. Verify Keystore/CSPRNG Key Management & DEK health
-        assertTrue(CryptoSecurityManager.verifyInvisibleSeedIntegrity())
+        assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
 
         // 2. Verify Layer 1: SettingsRepository Encrypted State with 6-digit PIN & 120k PBKDF2
         val settingsRepo = com.cyosplay.player.data.repository.SettingsRepository(context)
@@ -930,25 +930,26 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun mobileMovementSensor_masterPasswordEncryption_125VideoFormats_andExactVideoDetails() {
-        // 1. Verify invisible master seed reconstruction & full data encryption
-        assertTrue(CryptoSecurityManager.verifyInvisibleSeedIntegrity())
-        val invisibleSeed = String(CryptoSecurityManager.reconstructInvisibleMasterSeed())
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(invisibleSeed))
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(invisibleSeed.replace(" ", "")))
-        assertFalse(CryptoSecurityManager.isMasterPasswordMatched("wrong_password"))
+    fun mobileMovementSensor_devicePasscodeEncryption_125VideoFormats_andExactVideoDetails() {
+        // 1. Verify per-device keystore integrity & local PBKDF2 passcode protection (zero static secrets)
+        assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
+        val localPasscode = "948271"
+        assertTrue(CryptoSecurityManager.setDataCodesPasscode(context, localPasscode))
+        assertTrue(CryptoSecurityManager.hasDataCodesPasscode(context))
+        assertTrue(CryptoSecurityManager.verifyDataCodesPasscode(context, localPasscode))
+        assertFalse(CryptoSecurityManager.verifyDataCodesPasscode(context, "wrong_password"))
 
         val sensitiveDataCode = "VIDEO_DATA_CODE_4K_REMUX_STREAM_KEY_99182"
         val encryptedCode = CryptoSecurityManager.encryptString(context, sensitiveDataCode)
         assertTrue(CryptoSecurityManager.isEncryptedString(encryptedCode))
         assertEquals(sensitiveDataCode, CryptoSecurityManager.decryptString(context, encryptedCode))
 
-        // Verify master password data codes lock and unlock
-        CryptoSecurityManager.lockDataCodesWithMasterPassword(context)
+        // Verify local device passcode data codes lock and unlock
+        CryptoSecurityManager.lockDataCodes(context)
         assertTrue(CryptoSecurityManager.isDataCodesLocked(context))
-        assertFalse(CryptoSecurityManager.unlockDataCodesWithMasterPassword(context, "wrong_pw"))
+        assertFalse(CryptoSecurityManager.unlockDataCodesWithPasscode(context, "wrong_pw"))
         assertTrue(CryptoSecurityManager.isDataCodesLocked(context))
-        assertTrue(CryptoSecurityManager.unlockDataCodesWithMasterPassword(context, invisibleSeed))
+        assertTrue(CryptoSecurityManager.unlockDataCodesWithPasscode(context, localPasscode))
         assertFalse(CryptoSecurityManager.isDataCodesLocked(context))
 
         // 2. Verify 3-axis accelerometer mobile movement tilt calculation & instant 4-way auto-rotation
@@ -1071,7 +1072,8 @@ class ExampleRobolectricTest {
         assertTrue(exactProperties.fullSha256Checksum.isNotBlank())
         assertEquals(64, exactProperties.fullSha256Checksum.length)
 
-        // Verify locking data codes from ViewModel
+        // Verify locking data codes from ViewModel with user-chosen device passcode
+        assertTrue(viewModel.setDataCodesPasscode(localPasscode))
         viewModel.lockDataCodesWithMasterPassword()
         assertTrue(viewModel.uiState.value.isDataCodesLocked)
         assertTrue(viewModel.uiState.value.inspectedVideoProperties?.isDataCodesLocked == true)
@@ -1081,8 +1083,8 @@ class ExampleRobolectricTest {
         assertFalse(failed)
         assertTrue(viewModel.uiState.value.isDataCodesLocked)
 
-        // Verify reconstructed master seed unlocks successfully
-        val unlocked = viewModel.unlockDataCodesWithMasterPassword(invisibleSeed)
+        // Verify user device passcode unlocks successfully
+        val unlocked = viewModel.unlockDataCodesWithMasterPassword(localPasscode)
         assertTrue(unlocked)
         assertFalse(viewModel.uiState.value.isDataCodesLocked)
         assertFalse(viewModel.uiState.value.inspectedVideoProperties?.isDataCodesLocked == true)
@@ -1334,10 +1336,8 @@ class ExampleRobolectricTest {
             viewModel.uiState.value.lowRamShieldEnabled
         )
 
-        // 2. Build code & datacode encryption with reconstructed local build-code seed
-        val buildSeed = CryptoSecurityManager.reconstructBuildCodeMasterSeed()
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(buildSeed))
-        buildSeed.fill('\u0000')
+        // 2. Build code & datacode encryption with per-device AndroidKeyStore/CSPRNG AES-256-GCM DEK
+        assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
         val rawBuildCode = "BUILD_CODE_V103|CAPABILITY=${com.cyosplay.player.BuildConfig.MAJOR_CAPABILITY_ID}|RES=8K_UHD"
         val encryptedBuildCode = CryptoSecurityManager.encryptVideoDatacode(context, rawBuildCode)
         assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuildCode))
@@ -1748,19 +1748,10 @@ class ExampleRobolectricTest {
         assertTrue(File(copyResult.destinationFilePath!!).exists())
         tempDir.deleteRecursively()
 
-        // 5. Verify encrypted release keystore password and build code password tokens
-        val encryptedKeystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        val encryptedBuildCodeToken = CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(context)
-        assertTrue(encryptedKeystoreToken.isNotBlank())
-        assertTrue(encryptedBuildCodeToken.isNotBlank())
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, encryptedKeystoreToken)
-        )
-        assertEquals(
-            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, encryptedBuildCodeToken)
-        )
+        // 5. Verify per-device AES-256-GCM build-code payload encryption (zero embedded secrets)
+        val encryptedBuildPayload = CryptoSecurityManager.encryptBuildCodeData(context, "CYOSPLAY_1.05_BUILD_DATA")
+        assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuildPayload))
+        assertEquals("CYOSPLAY_1.05_BUILD_DATA", CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildPayload))
     }
 
     @Test
@@ -1955,17 +1946,10 @@ class ExampleRobolectricTest {
             viewModel.uiState.value.playbackProgressMap[sdStreamVideo.path]?.lastPositionMs
         )
 
-        // 5. Verify 1.05rv4 Release Keystore Password and Build Code Encryption Password tokens
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        val buildCodeToken = CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        assertEquals(
-            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, buildCodeToken)
-        )
+        // 5. Verify per-device AES-256-GCM datacode encryption
+        val encryptedBuild = CryptoSecurityManager.encryptBuildCodeData(context, "CYOSPLAY_1.05RV4_BUILD_DATA")
+        assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuild))
+        assertEquals("CYOSPLAY_1.05RV4_BUILD_DATA", CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild))
     }
 
     @Test
@@ -2054,23 +2038,10 @@ class ExampleRobolectricTest {
         viewModel.toggleMiniPlayerSizeMode()
         assertEquals(MiniPlayerSizeMode.COMPACT, viewModel.uiState.value.miniPlayerSizeMode)
 
-        // 6. Verify 1.06rv7 Encrypted Keystore Password, Build Code Password, and JAR Signature Password Tokens
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        val buildCodeToken = CryptoSecurityManager.getOrCreateEncryptedBuildCodePasswordToken(context)
-        val jarToken = CryptoSecurityManager.getOrCreateEncryptedJarSignaturePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        assertEquals(
-            CryptoSecurityManager.BUILD_CODE_ENCRYPTION_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, buildCodeToken)
-        )
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_DATA_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarToken)
-        )
-        assertTrue(CryptoSecurityManager.isJarDataPasswordMatched(CryptoSecurityManager.JAR_SIGNATURE_DATA_PASSWORD_SPEC))
+        // 6. Verify per-device AES-256-GCM datacode encryption (zero embedded passwords)
+        val encryptedBuild = CryptoSecurityManager.encryptBuildCodeData(context, "CYOSPLAY_1.06RV_BUILD_DATA")
+        assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuild))
+        assertEquals("CYOSPLAY_1.06RV_BUILD_DATA", CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild))
     }
 
     @Test
@@ -2639,12 +2610,12 @@ class ExampleRobolectricTest {
             0.01f
         )
 
-        // Verify encrypted passwords and zero-debug permanent lock
+        // Verify per-device datacode encryption and zero-debug permanent lock
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
-        val encryptedJarData = CryptoSecurityManager.encryptDataCodeWithJarPassword(context, "HINDI_MPEG4_ASP_DATACODE_v106rv9")
+        val encryptedDatacode = CryptoSecurityManager.encryptVideoDatacode(context, "HINDI_MPEG4_ASP_DATACODE_v106rv9")
         assertEquals(
             "HINDI_MPEG4_ASP_DATACODE_v106rv9",
-            CryptoSecurityManager.decryptDataCodeWithJarPassword(context, encryptedJarData)
+            CryptoSecurityManager.decryptVideoDatacode(context, encryptedDatacode)
         )
 
         // 17. Verify CyosPlay 1.06rv9 features:
@@ -2981,24 +2952,14 @@ class ExampleRobolectricTest {
         )
         assertEquals(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, landscapeTiltAtZero)
 
-        // 3. Verify 1.06rv13/1.06rv14 encrypted passwords (Keystore password + JAR/Build Code password)
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        val jarBuildPwToken = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv13Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV13_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwToken)
-        )
-        val encryptedBuildPayload = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv13(
+        // 3. Verify per-device AES-256-GCM build-code payload encryption
+        val encryptedBuildPayload = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV13_SIGNED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.06RV13_SIGNED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv13(context, encryptedBuildPayload)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildPayload)
         )
     }
 
@@ -3067,26 +3028,15 @@ class ExampleRobolectricTest {
         )
         moveRoot.deleteRecursively()
 
-        // 2. Verify 1.06rv14 encrypted passwords and build code encryption
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        val jarBuildPwTokenV14 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv14Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV14)
-        )
-        val encryptedBuildV14 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv14(
+        // 2. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuildV14 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV14_ENCRYPTED_BUILD_CODE_AND_DATA"
         )
         assertEquals(
             "CYOSPLAY_1.06RV14_ENCRYPTED_BUILD_CODE_AND_DATA",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv14(context, encryptedBuildV14)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildV14)
         )
-        assertTrue(CryptoSecurityManager.isMasterPasswordMatched(CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV14_SPEC))
     }
 
     @Test
@@ -3175,24 +3125,14 @@ class ExampleRobolectricTest {
         assertFalse("Copied destination file must be rolled back (deleted) so there is no duplicate", crossVolDest.exists())
         testRoot.deleteRecursively()
 
-        // 3. Verify 1.06rv15 encrypted keystore password and JAR/Build code password
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        val jarBuildPwTokenV15 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv15Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV15_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV15)
-        )
-        val encryptedBuildV15 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv15(
+        // 3. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuildV15 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV15_ENCRYPTED_BUILD_CODE_AND_DATA"
         )
         assertEquals(
             "CYOSPLAY_1.06RV15_ENCRYPTED_BUILD_CODE_AND_DATA",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv15(context, encryptedBuildV15)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildV15)
         )
     }
 
@@ -3307,24 +3247,14 @@ class ExampleRobolectricTest {
         assertEquals("ja", com.cyosplay.player.util.SubtitleParser.detectSubtitleLanguage("こんにちは世界"))
         assertEquals("ar", com.cyosplay.player.util.SubtitleParser.detectSubtitleLanguage("مرحبا بالعالم"))
 
-        // 4. Verify 1.06rv16 encrypted keystore password and JAR/Build code password
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        val jarBuildPwTokenV16 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv16Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV16_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV16)
-        )
-        val encryptedBuildV16 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv16(
+        // 4. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuildV16 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV16_ENCRYPTED_BUILD_CODE_AND_DATA"
         )
         assertEquals(
             "CYOSPLAY_1.06RV16_ENCRYPTED_BUILD_CODE_AND_DATA",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv16(context, encryptedBuildV16)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildV16)
         )
     }
 
@@ -3507,24 +3437,14 @@ class ExampleRobolectricTest {
         arabicSrt.delete()
         testRoot.deleteRecursively()
 
-        // 5. Verify 1.06rv17/1.06rv18 encrypted keystore password and JAR/Build code password
-        val keystoreToken = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken)
-        )
-        val jarBuildPwTokenV17 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv17Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV17_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwTokenV17)
-        )
-        val encryptedBuildV17 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv17(
+        // 5. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuildV17 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV17_ENCRYPTED_BUILD_CODE_AND_DATA"
         )
         assertEquals(
             "CYOSPLAY_1.06RV17_ENCRYPTED_BUILD_CODE_AND_DATA",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv17(context, encryptedBuildV17)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuildV17)
         )
     }
 
@@ -3721,24 +3641,14 @@ class ExampleRobolectricTest {
         recycleFile.delete()
         testRoot.deleteRecursively()
 
-        // 6. Verify 1.06rv18 encrypted keystore password & JAR/Build code password
-        val keystoreToken18 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken18)
-        )
-        val jarBuildPwToken18 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV106rv18Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V106RV18_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildPwToken18)
-        )
-        val encryptedBuild18 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV106rv18(
+        // 6. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild18 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.06RV18_ENCRYPTED_BUILD_CODE_AND_DATA"
         )
         assertEquals(
             "CYOSPLAY_1.06RV18_ENCRYPTED_BUILD_CODE_AND_DATA",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV106rv18(context, encryptedBuild18)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild18)
         )
     }
 
@@ -3904,24 +3814,14 @@ class ExampleRobolectricTest {
         srt2.delete()
         testRoot.deleteRecursively()
 
-        // 4. Verify 1.07rv encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rvToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107)
-        )
-        val jarBuildToken107 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rvToken(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107)
-        )
-        val encryptedBuild107 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv(
+        // 4. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv(context, encryptedBuild107)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107)
         )
     }
 
@@ -4072,24 +3972,14 @@ class ExampleRobolectricTest {
             )
         )
 
-        // 5. Verify 1.07rv2 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv2 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv2Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV2_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv2)
-        )
-        val jarBuildToken107rv2 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv2Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV2_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv2)
-        )
-        val encryptedBuild107rv2 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv2(
+        // 5. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv2 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV2_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV2_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv2(context, encryptedBuild107rv2)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv2)
         )
     }
 
@@ -4264,24 +4154,14 @@ class ExampleRobolectricTest {
         assertEquals(2, lrcCues.size)
         assertEquals("First Lyric Line", com.cyosplay.player.util.SubtitleParser.findActiveSubtitleCue(lrcCues, 2000L, 0L))
 
-        // 6. Verify 1.07rv3 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv3 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv3Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV3_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv3)
-        )
-        val jarBuildToken107rv3 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv3Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV3_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv3)
-        )
-        val encryptedBuild107rv3 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv3(
+        // 6. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv3 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV3_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV3_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv3(context, encryptedBuild107rv3)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv3)
         )
     }
 
@@ -4377,24 +4257,14 @@ class ExampleRobolectricTest {
         exoPlayer.release()
         tempSrtFile.delete()
 
-        // 5. Verify 1.07rv4 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv4 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv4Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV4_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv4)
-        )
-        val jarBuildToken107rv4 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv4Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV4_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv4)
-        )
-        val encryptedBuild107rv4 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv4(
+        // 5. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv4 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV4_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV4_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv4(context, encryptedBuild107rv4)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv4)
         )
     }
 
@@ -4497,24 +4367,14 @@ class ExampleRobolectricTest {
             )
         )
 
-        // 4. Verify 1.07rv5 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv5 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv5Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV5_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv5)
-        )
-        val jarBuildToken107rv5 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv5Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV5_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv5)
-        )
-        val encryptedBuild107rv5 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv5(
+        // 4. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv5 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV5_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV5_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv5(context, encryptedBuild107rv5)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv5)
         )
     }
 
@@ -4656,24 +4516,14 @@ class ExampleRobolectricTest {
             )
         )
 
-        // 7. Verify 1.07rv6 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv6 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv6Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV6_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv6)
-        )
-        val jarBuildToken107rv6 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv6Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV6_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv6)
-        )
-        val encryptedBuild107rv6 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv6(
+        // 7. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv6 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV6_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV6_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv6(context, encryptedBuild107rv6)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv6)
         )
     }
 
@@ -4751,50 +4601,20 @@ class ExampleRobolectricTest {
             )
         )
 
-        // 8. Verify 1.07rv7 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV7_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7)
-        )
-        val jarBuildToken107rv7 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7)
-        )
-        val encryptedBuild107rv7 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7(
-            context,
-            "CYOSPLAY_1.07RV7_SIGNED_ENCRYPTED_BUILD_CODE"
-        )
-        assertEquals(
-            "CYOSPLAY_1.07RV7_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv7(context, encryptedBuild107rv7)
-        )
-
-        // 9. Verify direct zero-cache CyosSmartDataSourceFactory, direct ExoPlayer creation, and V107RV8 password encryption
+        // 8. Verify direct zero-cache CyosSmartDataSourceFactory, direct ExoPlayer creation, and per-device encryption
         val smartFactory = com.cyos.player.CyosSmartDataSourceFactory(context)
         assertNotNull(smartFactory.createDataSource())
         val directPlayer = com.cyos.player.CyosFastPlayer.createDirectExoPlayer(context)
         assertNotNull(directPlayer)
         directPlayer.release()
 
-        val keystoreToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv8Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV8_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv8)
-        )
-        val jarBuildToken107rv8 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv8Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV8_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv8)
-        )
-        val encryptedBuild107rv8 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv8(
+        val encryptedBuild107rv8 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV8_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV8_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv8(context, encryptedBuild107rv8)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv8)
         )
     }
 
@@ -4911,24 +4731,14 @@ class ExampleRobolectricTest {
         assertTrue("Extractor factory must produce extractors", extractors.isNotEmpty())
         assertNotNull(com.cyos.player.CyosFastPlayer.createWarmExoPlayerBuilder(context))
 
-        // 5. Verify 1.07rv7a encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV107rv7aToken(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V107RV7A_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken107rv7a)
-        )
-        val jarBuildToken107rv7a = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV107rv7aToken(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V107RV7A_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken107rv7a)
-        )
-        val encryptedBuild107rv7a = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV107rv7a(
+        // 5. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild107rv7a = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.07RV7A_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.07RV7A_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV107rv7a(context, encryptedBuild107rv7a)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild107rv7a)
         )
     }
 
@@ -5088,24 +4898,14 @@ class ExampleRobolectricTest {
         assertEquals(20_000L, secondRapidTapSkip.cumulativeDeltaMs)
         assertFalse(secondRapidTapSkip.shouldDispatchPlayerSeek)
 
-        // 6. Verify 1.08rv4 encrypted release keystore password & JAR/Build code encryption
-        val keystoreToken108rv4 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV108rv4Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V108RV4_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken108rv4)
-        )
-        val jarBuildToken108rv4 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV108rv4Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV4_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken108rv4)
-        )
-        val encryptedBuild108rv4 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV108rv4(
+        // 6. Verify per-device AES-256-GCM build code encryption
+        val encryptedBuild108rv4 = CryptoSecurityManager.encryptBuildCodeData(
             context,
             "CYOSPLAY_1.08RV4_SIGNED_ENCRYPTED_BUILD_CODE"
         )
         assertEquals(
             "CYOSPLAY_1.08RV4_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV108rv4(context, encryptedBuild108rv4)
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild108rv4)
         )
     }
 
@@ -5177,27 +4977,51 @@ class ExampleRobolectricTest {
             )
         }
 
-        // 6. Verify 1.08rv5 secret-safe env token encryption & JAR/build-code AES-256-GCM encryption
-        assertTrue(CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V108RV5_SPEC.startsWith("ENV:"))
-        assertTrue(CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV5_SPEC.startsWith("ENV:"))
-        val keystoreToken108rv5 = CryptoSecurityManager.getOrCreateEncryptedKeystorePasswordV108rv5Token(context)
-        assertEquals(
-            CryptoSecurityManager.RELEASE_KEYSTORE_PASSWORD_V108RV5_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, keystoreToken108rv5)
+        // 6. Verify zero embedded XOR shards or legacy keystore/JAR password constants exist in CryptoSecurityManager
+        val forbiddenFieldTokens = listOf(
+            "SHARD_",
+            "RELEASE_KEYSTORE_PASSWORD",
+            "JAR_SIGNATURE_BUILD_CODE_PASSWORD",
+            "BUILD_CODE_ENCRYPTION_PASSWORD",
+            "MASTER_PASSWORD_LOCKED"
         )
-        val jarBuildToken108rv5 = CryptoSecurityManager.getOrCreateEncryptedJarBuildCodePasswordV108rv5Token(context)
-        assertEquals(
-            CryptoSecurityManager.JAR_SIGNATURE_BUILD_CODE_PASSWORD_V108RV5_SPEC,
-            CryptoSecurityManager.decryptVideoDatacode(context, jarBuildToken108rv5)
-        )
-        val encryptedBuild108rv5 = CryptoSecurityManager.encryptBuildCodeWithJarPasswordV108rv5(
+        val declaredFieldNames = CryptoSecurityManager::class.java.declaredFields.map { it.name }
+        forbiddenFieldTokens.forEach { token ->
+            assertTrue(
+                "CryptoSecurityManager must not contain any embedded secret field matching $token",
+                declaredFieldNames.none { it.contains(token) }
+            )
+        }
+        val declaredMethodNames = CryptoSecurityManager::class.java.declaredMethods.map { it.name }
+        listOf(
+            "getOrCreateEncryptedKeystorePassword",
+            "getOrCreateEncryptedJarBuildCodePassword",
+            "encryptBuildCodeWithJarPassword",
+            "reconstructInvisibleMasterSeed"
+        ).forEach { forbiddenMethod ->
+            assertTrue(
+                "CryptoSecurityManager must not contain legacy secret method $forbiddenMethod",
+                declaredMethodNames.none { it.contains(forbiddenMethod) }
+            )
+        }
+
+        // 7. Verify per-device AES-256-GCM encryption & user-chosen Vault PIN / Device Passcode locking
+        assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
+        val encryptedBuild108rv5 = CryptoSecurityManager.encryptBuildCodeData(
             context,
-            "CYOSPLAY_1.08RV5_SIGNED_ENCRYPTED_BUILD_CODE"
+            "CYOSPLAY_1.08RV5_PER_DEVICE_ENCRYPTED_DATA"
         )
         assertTrue(CryptoSecurityManager.isEncryptedString(encryptedBuild108rv5))
         assertEquals(
-            "CYOSPLAY_1.08RV5_SIGNED_ENCRYPTED_BUILD_CODE",
-            CryptoSecurityManager.decryptBuildCodeWithJarPasswordV108rv5(context, encryptedBuild108rv5)
+            "CYOSPLAY_1.08RV5_PER_DEVICE_ENCRYPTED_DATA",
+            CryptoSecurityManager.decryptBuildCodeData(context, encryptedBuild108rv5)
         )
+
+        viewModel.setupInitialVaultPin("654321", "Favorite color?", "Blue")
+        viewModel.lockDataCodesWithMasterPassword()
+        assertTrue(viewModel.uiState.value.isDataCodesLocked)
+        assertFalse(viewModel.unlockDataCodesWithMasterPassword("000000"))
+        assertTrue(viewModel.unlockDataCodesWithMasterPassword("654321"))
+        assertFalse(viewModel.uiState.value.isDataCodesLocked)
     }
 }
