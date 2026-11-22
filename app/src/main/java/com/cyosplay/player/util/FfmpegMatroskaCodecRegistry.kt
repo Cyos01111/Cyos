@@ -215,6 +215,9 @@ object FfmpegMatroskaCodecRegistry {
         "mkvmerge", "matroska,webm", "matroska/webm", "lavf62.3.100", "lavf60.3.100",
         "libebml v1.4.5 + libmatroska v1.7.1", "opus", "a_opus", "ass", "ssa", "s_text/ass", "s_text/ssa",
         "v_mpegh/iso/hevc", "h265", "hev1", "hvc1",
+        "av01", "vp09", "dvhe", "dvh1", "hdr10", "hdr10+", "hlg",
+        "ac-3", "ec-3", "eac3", "flac", "alac", "pcm", "vorbis", "mp3", "dts", "truehd",
+        "webvtt", "subrip", "pgs", "m2ts", "mts", "mxf", "ogv", "m4v", "3gp", "3g2", "flv", "avi", "wmv", "asf", "mov", "ts", "vob", "mpg", "mpeg",
         "h.264 / avc / mpeg-4 avc / mpeg-4 part 10", "mpeg-4 part 10", "mpeg-4 avc"
     )
 

@@ -42,7 +42,7 @@ object OpenSourceLicenses {
             version = "1.5.1",
             licenseType = "Apache 2.0",
             copyright = "Copyright (C) The Android Open Source Project",
-            summary = "Hardware-accelerated video/audio playback, container extractors, caching, preloading, and MediaSession support.",
+            summary = "Hardware-accelerated video/audio playback, container extractors, and MediaSession support.",
             licenseText = APACHE_2_NOTICE
         ),
         OpenSourceLicenseNotice(

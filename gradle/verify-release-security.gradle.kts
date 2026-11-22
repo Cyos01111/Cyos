@@ -43,8 +43,8 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             return null
         }
 
-        val releaseVersionName = "1.08rv4"
-        val releaseVersionCode = 46
+        val releaseVersionName = "1.08rv5"
+        val releaseVersionCode = 47
         val releaseKeystorePath = resolveSecret("CYOSPLAY_RELEASE_KEYSTORE_PATH") ?: "cyosplay-release.keystore"
         val releaseKeyAlias = resolveSecret("CYOSPLAY_RELEASE_KEY_ALIAS") ?: "cyosplay_release"
         val releaseKeystorePassword = resolveSecret("CYOSPLAY_RELEASE_STORE_PASSWORD")

@@ -538,7 +538,7 @@ fun CyosPlayRootApp(
                     )
                 }
 
-                // Master Password Unlock Dialog ("a12@ #$%DQWaA2-=d,q./qweAS")
+                // Master Password Unlock Dialog
                 if (uiState.showMasterPasswordLockDialog) {
                     MasterPasswordLockDialog(
                         isOpen = true,

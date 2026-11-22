@@ -74,6 +74,11 @@ object VideoFrameThumbnailCache {
         cache.put(path, bitmap)
     }
 
+    @Synchronized
+    fun clear() {
+        cache.evictAll()
+    }
+
     fun extractVideoFrameBitmap(path: String, targetWidthPx: Int = 280, targetHeightPx: Int = 158): ImageBitmap? {
         get(path)?.let { return it }
         val file = File(path)

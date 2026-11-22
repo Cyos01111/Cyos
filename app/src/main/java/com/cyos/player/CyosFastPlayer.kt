@@ -17,26 +17,28 @@ import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
-import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
-import androidx.media3.exoplayer.trackselection.TrackSelector
 import androidx.media3.exoplayer.upstream.DefaultAllocator
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import com.cyosplay.player.XvidSupportExtractorsFactory
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 
+/**
+ * Direct, cache-free and preloader-free ExoPlayer factory tuned for stable CPU/RAM usage
+ * and minimal battery drain across Android 7–18.
+ */
 @OptIn(UnstableApi::class)
 object CyosFastPlayer {
 
     const val BUFFER_FOR_PLAYBACK_MS: Int = 600
     const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS: Int = 1_500
-    const val BACK_BUFFER_DURATION_MS: Int = 15_000
-    const val LOW_RAM_MIN_BUFFER_MS: Int = 10_000
-    const val LOW_RAM_MAX_BUFFER_MS: Int = 20_000
-    const val STANDARD_MIN_BUFFER_MS: Int = 15_000
-    const val STANDARD_MAX_BUFFER_MS: Int = 35_000
-    const val LOW_RAM_TARGET_BUFFER_BYTES: Int = 16 * 1024 * 1024
+    const val BACK_BUFFER_DURATION_MS: Int = 10_000
+    const val LOW_RAM_MIN_BUFFER_MS: Int = 8_000
+    const val LOW_RAM_MAX_BUFFER_MS: Int = 16_000
+    const val STANDARD_MIN_BUFFER_MS: Int = 12_000
+    const val STANDARD_MAX_BUFFER_MS: Int = 24_000
+    const val LOW_RAM_TARGET_BUFFER_BYTES: Int = 10 * 1024 * 1024
+    const val STANDARD_TARGET_BUFFER_BYTES: Int = 24 * 1024 * 1024
     const val NETWORK_INITIAL_VIDEO_BITRATE: Int = 4_000_000
     const val INITIAL_BANDWIDTH_ESTIMATE_BPS: Long = 1_500_000L
 
@@ -54,25 +56,33 @@ object CyosFastPlayer {
 
     fun createLoadControl(
         context: Context,
-        forceLowRamMode: Boolean = false
+        forceLowRamMode: Boolean = false,
+        batterySaverEnabled: Boolean = false
     ): DefaultLoadControl {
         val isLowRam = forceLowRamMode || isLowRamDevice(context)
-        val builder = DefaultLoadControl.Builder()
+        val minBuf = if (isLowRam) LOW_RAM_MIN_BUFFER_MS else STANDARD_MIN_BUFFER_MS
+        val maxBuf = when {
+            isLowRam -> LOW_RAM_MAX_BUFFER_MS
+            batterySaverEnabled -> 18_000
+            else -> STANDARD_MAX_BUFFER_MS
+        }
+        val targetBytes = when {
+            isLowRam -> LOW_RAM_TARGET_BUFFER_BYTES
+            batterySaverEnabled -> 16 * 1024 * 1024
+            else -> STANDARD_TARGET_BUFFER_BYTES
+        }
+        return DefaultLoadControl.Builder()
             .setAllocator(DefaultAllocator(true, 64 * 1024))
             .setBufferDurationsMs(
-                if (isLowRam) LOW_RAM_MIN_BUFFER_MS else STANDARD_MIN_BUFFER_MS,
-                if (isLowRam) LOW_RAM_MAX_BUFFER_MS else STANDARD_MAX_BUFFER_MS,
+                minBuf,
+                maxBuf,
                 BUFFER_FOR_PLAYBACK_MS,
                 BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS
             )
-            .setBackBuffer(BACK_BUFFER_DURATION_MS, true)
-            .setPrioritizeTimeOverSizeThresholds(true)
-        if (isLowRam) {
-            builder.setTargetBufferBytes(LOW_RAM_TARGET_BUFFER_BYTES)
-        } else {
-            builder.setTargetBufferBytes(C.LENGTH_UNSET)
-        }
-        return builder.build()
+            .setBackBuffer(if (isLowRam || batterySaverEnabled) 6_000 else BACK_BUFFER_DURATION_MS, true)
+            .setTargetBufferBytes(targetBytes)
+            .setPrioritizeTimeOverSizeThresholds(false)
+            .build()
     }
 
     fun createRenderersFactory(
@@ -104,8 +114,6 @@ object CyosFastPlayer {
                 .setExceedAudioConstraintsIfNecessary(true)
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitlesEnabledByUser)
             if (capNetworkStartupBitrate) {
-                // Avoid stalling on a 4K/1080p first segment on slow network connections;
-                // ABR ramps up automatically once playback is rolling.
                 paramsBuilder.setMaxVideoBitrate(NETWORK_INITIAL_VIDEO_BITRATE)
             }
             parameters = paramsBuilder.build()
@@ -128,39 +136,14 @@ object CyosFastPlayer {
         selector.parameters = paramsBuilder.build()
     }
 
-    fun createPreloadBuilder(
+    fun createDirectMediaSourceFactory(
         context: Context,
-        statusControl: TargetPreloadStatusControl<Int>,
-        smartDataSourceFactory: DataSource.Factory = CyosSmartDataSourceFactory(context),
-        loadControl: LoadControl = createLoadControl(context),
-        renderersFactory: DefaultRenderersFactory = createRenderersFactory(context),
-        capNetworkStartupBitrate: Boolean = false,
-        subtitlesEnabledByUser: Boolean = false
-    ): DefaultPreloadManager.Builder {
-        val appContext = context.applicationContext ?: context
-        val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
-            .setInitialBitrateEstimate(INITIAL_BANDWIDTH_ESTIMATE_BPS)
-            .build()
-
-        return DefaultPreloadManager.Builder(appContext, statusControl)
-            .setLoadControl(loadControl)
-            .setRenderersFactory(renderersFactory)
-            .setBandwidthMeter(bandwidthMeter)
-            .setTrackSelectorFactory(
-                TrackSelector.Factory { ctx ->
-                    createTrackSelector(
-                        context = ctx,
-                        capNetworkStartupBitrate = capNetworkStartupBitrate,
-                        subtitlesEnabledByUser = subtitlesEnabledByUser
-                    )
-                }
-            )
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(
-                    smartDataSourceFactory,
-                    XvidSupportExtractorsFactory()
-                )
-            )
+        dataSourceFactory: DataSource.Factory = CyosSmartDataSourceFactory(context)
+    ): DefaultMediaSourceFactory {
+        return DefaultMediaSourceFactory(
+            dataSourceFactory,
+            XvidSupportExtractorsFactory()
+        )
     }
 
     fun createWarmExoPlayerBuilder(context: Context): ExoPlayer.Builder {
@@ -179,28 +162,47 @@ object CyosFastPlayer {
             .setHandleAudioBecomingNoisy(true)
     }
 
+    fun createDirectExoPlayer(
+        context: Context,
+        loadControl: LoadControl = createLoadControl(context),
+        renderersFactory: DefaultRenderersFactory = createRenderersFactory(context),
+        dataSourceFactory: DataSource.Factory = CyosSmartDataSourceFactory(context),
+        capNetworkStartupBitrate: Boolean = false,
+        subtitlesEnabledByUser: Boolean = false
+    ): ExoPlayer {
+        val appContext = context.applicationContext ?: context
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(appContext)
+            .setInitialBitrateEstimate(INITIAL_BANDWIDTH_ESTIMATE_BPS)
+            .build()
+        val trackSelector = createTrackSelector(
+            context = appContext,
+            capNetworkStartupBitrate = capNetworkStartupBitrate,
+            subtitlesEnabledByUser = subtitlesEnabledByUser
+        )
+        return createWarmExoPlayerBuilder(appContext)
+            .setLoadControl(loadControl)
+            .setRenderersFactory(renderersFactory)
+            .setBandwidthMeter(bandwidthMeter)
+            .setTrackSelector(trackSelector)
+            .setMediaSourceFactory(createDirectMediaSourceFactory(appContext, dataSourceFactory))
+            .build()
+            .apply {
+                videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+            }
+    }
+
     fun playOnTap(
         player: ExoPlayer,
-        preloadManager: DefaultPreloadManager,
         mediaItem: MediaItem,
         resumeMs: Long = 0L,
         autoPlay: Boolean = true
     ) {
         val itemUri = mediaItem.localConfiguration?.uri
         applyBitratePolicyForUri(player, itemUri)
-        val preloadedSource = runCatching { preloadManager.getMediaSource(mediaItem) }.getOrNull()
-        if (preloadedSource != null) {
-            if (resumeMs > 0L) {
-                player.setMediaSource(preloadedSource, resumeMs)
-            } else {
-                player.setMediaSource(preloadedSource)
-            }
+        if (resumeMs > 0L) {
+            player.setMediaItem(mediaItem, resumeMs)
         } else {
-            if (resumeMs > 0L) {
-                player.setMediaItem(mediaItem, resumeMs)
-            } else {
-                player.setMediaItem(mediaItem)
-            }
+            player.setMediaItem(mediaItem)
         }
         player.playWhenReady = autoPlay
         player.prepare()

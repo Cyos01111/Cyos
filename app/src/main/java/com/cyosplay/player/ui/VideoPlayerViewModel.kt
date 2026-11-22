@@ -89,8 +89,8 @@ enum class MiniPlayerSizeMode {
 }
 
 data class VideoPlayerUiState(
-    val appVersionName: String = "1.08rv4",
-    val appDescription: String = "CyosPlay 1.08rv4",
+    val appVersionName: String = "1.08rv5",
+    val appDescription: String = "CyosPlay 1.08rv5",
     val aboutUsCreator: String = "Created by Tkm",
     val aboutUsCopyright: String = "© 2026 TKm. All rights reserved.",
     val currentNavTab: NavDestination = NavDestination.FOLDERS,
@@ -886,14 +886,13 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             0L
         }
         val stateSnap = _uiState.value
-        val codecProfileKey = "${stateSnap.decoderEngineMode.name}:${stateSnap.forceHardwareAccelerationHighBitrate}:${stateSnap.lowRamShieldEnabled}"
+        val codecProfileKey = "${stateSnap.decoderEngineMode.name}:${stateSnap.forceHardwareAccelerationHighBitrate}:${stateSnap.lowRamShieldEnabled}:${stateSnap.batterySaverModeEnabled}"
         com.cyos.player.CyosPlayerHolder.prepareOnTap(
             context = getApplication(),
             mediaItem = androidx.media3.common.MediaItem.fromUri(video.uri),
-            playlist = queueItems.map { androidx.media3.common.MediaItem.fromUri(it.uri) },
-            currentIndex = targetIndex,
             resumeMs = resumeMs,
-            codecProfileKey = codecProfileKey
+            codecProfileKey = codecProfileKey,
+            batterySaverEnabled = stateSnap.batterySaverModeEnabled
         )
         navigateTo(Screen.Player(video = video, playlistQueue = queue))
     }

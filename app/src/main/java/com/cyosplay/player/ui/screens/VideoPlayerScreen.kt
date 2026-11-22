@@ -612,14 +612,15 @@ fun VideoPlayerScreen(
         } else {
             DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
         }
-        val codecProfileKey = "${uiState.decoderEngineMode.name}:${uiState.forceHardwareAccelerationHighBitrate}:${uiState.lowRamShieldEnabled}"
+        val codecProfileKey = "${uiState.decoderEngineMode.name}:${uiState.forceHardwareAccelerationHighBitrate}:${uiState.lowRamShieldEnabled}:${uiState.batterySaverModeEnabled}"
         com.cyos.player.CyosPlayerHolder.getOrCreateSession(
             context = context,
             mediaCodecSelector = codecSelector,
             extensionRendererMode = extMode,
             codecProfileKey = codecProfileKey,
             subtitlesEnabledByUser = uiState.subtitlesEnabledByUser,
-            forceLowRamMode = uiState.lowRamShieldEnabled
+            forceLowRamMode = uiState.lowRamShieldEnabled,
+            batterySaverEnabled = uiState.batterySaverModeEnabled
         )
     }
 
@@ -661,26 +662,7 @@ fun VideoPlayerScreen(
         )
     }
 
-    val preloadManager = playerSession.preloadManager
-    val preloadStatusControl = playerSession.statusControl
-
-    // Restrict preload queue to a tight 3-item sliding window (prev, current, next) to keep RAM & CPU flat
-    LaunchedEffect(playerSession, playlistQueue, activeVideo.path) {
-        if (playlistQueue.isNotEmpty()) {
-            val activeIdx = playlistQueue.indexOfFirst { it.path == activeVideo.path }.coerceAtLeast(0)
-            val startIdx = (activeIdx - 1).coerceAtLeast(0)
-            val endIdx = (activeIdx + 1).coerceAtMost(playlistQueue.lastIndex)
-            runCatching {
-                preloadManager.reset()
-                for (idx in startIdx..endIdx) {
-                    preloadManager.add(MediaItem.fromUri(playlistQueue[idx].uri), idx)
-                }
-                preloadStatusControl.currentPlayingIndex = activeIdx
-                preloadManager.setCurrentPlayingIndex(activeIdx)
-                preloadManager.invalidate()
-            }
-        }
-    }
+    // Direct zero-cache playback without background preloader queues to keep RAM, CPU & battery minimal
 
     val exoPlayer = remember(playerSession) {
         playerSession.player.apply {
@@ -954,10 +936,6 @@ fun VideoPlayerScreen(
 
     LaunchedEffect(activeVideo.uri, playerSession) {
         viewModel.discoverSidecarSubtitlesForVideo(activeVideo)
-        val queueIndex = playlistQueue.indexOfFirst { it.path == activeVideo.path }.coerceAtLeast(0)
-        preloadStatusControl.currentPlayingIndex = queueIndex
-        preloadManager.setCurrentPlayingIndex(queueIndex)
-        preloadManager.invalidate()
 
         val alreadyPreparedOnTap = com.cyos.player.CyosPlayerHolder.consumeMatchingPrePreparedUri(activeVideo.uri)
         if (alreadyPreparedOnTap) {
@@ -975,7 +953,6 @@ fun VideoPlayerScreen(
             val startPos = if (currentPositionMs > 0L && !uiState.stealthPlaybackEnabled) currentPositionMs else 0L
             com.cyos.player.CyosFastPlayer.playOnTap(
                 player = exoPlayer,
-                preloadManager = preloadManager,
                 mediaItem = MediaItem.fromUri(activeVideo.uri),
                 resumeMs = startPos,
                 autoPlay = isPlaying
@@ -1104,12 +1081,12 @@ fun VideoPlayerScreen(
                 }
             }
 
-            // Periodic 4-second Last-Resume checkpoint (skipped during active gestures, scrubbing, or Stealth Playback)
+            // Periodic 5-second Last-Resume checkpoint (skipped during active gestures, scrubbing, or Stealth Playback)
             val now = System.currentTimeMillis()
             if (!uiState.stealthPlaybackEnabled &&
                 !isGestureBusy &&
                 !isUserScrubbing &&
-                now - lastCheckpointSavedMs >= 4000L &&
+                now - lastCheckpointSavedMs >= 5000L &&
                 currentPositionMs > 0L
             ) {
                 viewModel.savePlaybackProgress(activeVideo.path, currentPositionMs, totalDurationMs)
@@ -1127,11 +1104,11 @@ fun VideoPlayerScreen(
             val hasActiveSubtitles = uiState.subtitlesEnabledByUser && uiState.externalSubtitleCues.isNotEmpty()
             val hasAbLoop = uiState.abRepeatStartMs != null && uiState.abRepeatEndMs != null
             val pollDelayMs = when {
-                isGestureBusy -> 1200L
-                uiState.batterySaverModeEnabled -> 550L // Battery Smoothness Shield power saving
-                controlsVisible && !uiState.isControlsLocked -> minOf(350L, memoryBudget.positionPollingIntervalMs)
-                hasActiveSubtitles || hasAbLoop -> 420L
-                else -> maxOf(1800L, memoryBudget.positionPollingIntervalMs)
+                isGestureBusy -> 1400L
+                uiState.batterySaverModeEnabled -> 700L
+                controlsVisible && !uiState.isControlsLocked -> minOf(400L, memoryBudget.positionPollingIntervalMs)
+                hasActiveSubtitles || hasAbLoop -> 450L
+                else -> maxOf(2200L, memoryBudget.positionPollingIntervalMs)
             }
             delay(pollDelayMs)
         }
@@ -1170,10 +1147,6 @@ fun VideoPlayerScreen(
             if (playerSession.isPooled) {
                 com.cyos.player.CyosPlayerHolder.pauseAndDetachIfPooled()
             } else {
-                try {
-                    preloadManager.release()
-                } catch (_: Throwable) {
-                }
                 try {
                     exoPlayer.release()
                 } catch (_: Throwable) {

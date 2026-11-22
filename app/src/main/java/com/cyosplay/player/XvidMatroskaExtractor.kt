@@ -423,9 +423,9 @@ fun buildCyosExoPlayer(
         .setEnableDecoderFallback(true)
         .setExtensionRendererMode(extensionRendererMode)
 
-    // 3. Use CyosMediaCache + XvidSupportExtractorsFactory for cached local/HTTP playback & XVID csd-0 recovery
+    // 3. Use direct zero-cache DataSource + XvidSupportExtractorsFactory for local/HTTP playback & XVID csd-0 recovery
     val mediaSourceFactory = DefaultMediaSourceFactory(
-        com.cyos.player.CyosMediaCache.buildCacheDataSourceFactory(appCtx),
+        com.cyos.player.CyosSmartDataSourceFactory(appCtx),
         XvidSupportExtractorsFactory()
     )
 

@@ -477,6 +477,7 @@ data class VideoItem(
             1920 to 816,
             1920 to 1080,
             1920 to 1200,
+            2048 to 1080,
             2048 to 1152,
             2048 to 1536,
             2560 to 1080,
@@ -488,17 +489,24 @@ data class VideoItem(
             3200 to 2400,
             3440 to 1440,
             3840 to 1600,
+            3840 to 1608,
+            3840 to 1634,
             3840 to 2160,
             3840 to 2400,
+            4096 to 1716,
             4096 to 2160,
             4096 to 3072,
+            5120 to 2160,
             5120 to 2880,
             5120 to 3200,
             5120 to 4096,
+            6144 to 3160,
+            6144 to 3456,
             6400 to 4096,
             6400 to 4800,
             7680 to 4320,
             7680 to 4800,
+            12288 to 6480,
             15360 to 8640
         )
 
@@ -526,11 +534,18 @@ data class VideoItem(
                 mimeSub.contains("QUICKTIME") -> "MOV"
                 mimeSub.contains("MSVIDEO") -> "AVI"
                 mimeSub.contains("MS-WMV") -> "WMV"
+                mimeSub.contains("MS-ASF") -> "ASF"
                 mimeSub.contains("MP2T") -> "TS"
+                mimeSub.contains("MPEG") -> "MPG"
                 mimeSub.contains("FLV") -> "FLV"
                 mimeSub.contains("WEBM") -> "WEBM"
+                mimeSub.contains("OGG") -> "OGV"
+                mimeSub.contains("MXF") -> "MXF"
                 mimeSub.contains("3GPP2") -> "3G2"
                 mimeSub.contains("3GPP") -> "3GP"
+                mimeSub.contains("M4V") -> "M4V"
+                mimeSub.contains("AV01") || mimeSub.contains("AV1") -> "AV1"
+                mimeSub.contains("VP9") || mimeSub.contains("VP09") -> "VP9"
                 mimeSub.contains("HEVC") || mimeSub.contains("DOLBY-VISION") -> "HEVC"
                 mimeSub.isNotEmpty() && mimeSub != "*" -> mimeSub.take(6)
                 else -> "MP4"
@@ -597,8 +612,7 @@ data class VideoItem(
 
 /**
  * Comprehensive exact technical metadata for a video file, displayed in the
- * Video Properties inspector sheet, fully encrypted and lock-protected with
- * master password "a12@ #$%DQWaA2-=d,q./qweAS".
+ * Video Properties inspector sheet, fully encrypted and lock-protected with AES-256-GCM.
  */
 data class VideoProperties(
     val videoId: Long,
@@ -640,7 +654,7 @@ data class VideoProperties(
     val dateCreatedFormatted: String = "",
     val audioBitrateLabel: String = "192 kbps (192,000 bps)",
     val isDataCodesLocked: Boolean = false,
-    val masterPasswordLockBadge: String = "Locked with Master Password: a12@ #$%DQWaA2-=d,q./qweAS (AES-256-GCM)",
+    val masterPasswordLockBadge: String = "Locked with Master Password (AES-256-GCM)",
     val chromaSubsamplingBitDepth: String = "YUV 4:2:0, 8-bit (yuv420p)",
     val avcProfileLevelLabel: String = "Main Profile (avc1.4d401e) or High Profile (avc1.64001e) at Level 3.0 / 3.1 • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 • libx264, yuv420p, -movflags +faststart",
     val aacProfileLabel: String = "HE-AAC & AAC-LC (Low Complexity, mp4a.40.2) • AAC LC (44.1 kHz, Stereo) • 44100 HZ (8,000 Hz – 384,000 Hz)",

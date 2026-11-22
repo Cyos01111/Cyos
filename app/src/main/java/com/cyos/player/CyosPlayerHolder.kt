@@ -4,31 +4,26 @@ import android.content.ComponentCallbacks2
 import android.content.Context
 import android.net.Uri
 import androidx.annotation.OptIn
-import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
-import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import com.cyosplay.player.util.Eac3DownmixAudioProcessor
 
+/**
+ * Lightweight, cache-free and preloader-free ExoPlayer session manager.
+ * Eliminates background preloading queues and immediately clears idle media buffers on detach
+ * to maintain flat RAM usage and minimal battery consumption.
+ */
 @OptIn(UnstableApi::class)
 object CyosPlayerHolder {
 
     data class PooledPlayerSession(
-        val preloadManager: DefaultPreloadManager,
-        val statusControl: CyosPreloadStatusControl,
         val player: ExoPlayer,
         val downmixAudioProcessor: Eac3DownmixAudioProcessor,
         val isPooled: Boolean
     )
-
-    @Volatile
-    private var preloadManager: DefaultPreloadManager? = null
-
-    @Volatile
-    private var statusControl: CyosPreloadStatusControl? = null
 
     @Volatile
     private var pooledPlayer: ExoPlayer? = null
@@ -38,9 +33,6 @@ object CyosPlayerHolder {
 
     @Volatile
     private var lastPreparedPositionMs: Long = 0L
-
-    @Volatile
-    private var lastSubmittedUris: List<Uri> = emptyList()
 
     @Volatile
     private var lastCodecKey: String = ""
@@ -54,40 +46,31 @@ object CyosPlayerHolder {
         extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
         codecProfileKey: String = "DEFAULT:$extensionRendererMode",
         subtitlesEnabledByUser: Boolean = false,
-        forceLowRamMode: Boolean = false
+        forceLowRamMode: Boolean = false,
+        batterySaverEnabled: Boolean = false
     ): PooledPlayerSession {
         val appContext = context.applicationContext ?: context
         val isLowRam = forceLowRamMode || CyosFastPlayer.isLowRamDevice(appContext)
         val shouldPool = !isLowRam
 
         val existingPlayer = pooledPlayer
-        val existingPreload = preloadManager
-        val existingControl = statusControl
         if (shouldPool &&
             existingPlayer != null &&
-            existingPreload != null &&
-            existingControl != null &&
             lastCodecKey == codecProfileKey
         ) {
             return PooledPlayerSession(
-                preloadManager = existingPreload,
-                statusControl = existingControl,
                 player = existingPlayer,
                 downmixAudioProcessor = sharedDownmixAudioProcessor,
                 isPooled = true
             )
         }
 
-        // Release any stale pool when codec config changes or switching into low-RAM mode
         releaseInternal()
 
-        val control = CyosPreloadStatusControl(
-            currentPlayingIndex = 0,
-            isLowRamDevice = isLowRam
-        )
         val loadControl = CyosFastPlayer.createLoadControl(
             context = appContext,
-            forceLowRamMode = forceLowRamMode
+            forceLowRamMode = forceLowRamMode,
+            batterySaverEnabled = batterySaverEnabled
         )
         val renderersFactory = CyosFastPlayer.createRenderersFactory(
             context = appContext,
@@ -95,32 +78,21 @@ object CyosPlayerHolder {
             mediaCodecSelector = mediaCodecSelector,
             extensionRendererMode = extensionRendererMode
         )
-        val builder = CyosFastPlayer.createPreloadBuilder(
+
+        val newPlayer = CyosFastPlayer.createDirectExoPlayer(
             context = appContext,
-            statusControl = control,
             loadControl = loadControl,
             renderersFactory = renderersFactory,
             capNetworkStartupBitrate = false,
             subtitlesEnabledByUser = subtitlesEnabledByUser
         )
 
-        val newPreloadManager = builder.build()
-        val newPlayer = builder.buildExoPlayer(
-            CyosFastPlayer.createWarmExoPlayerBuilder(appContext)
-        ).apply {
-            videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-        }
-
         if (shouldPool) {
-            preloadManager = newPreloadManager
-            statusControl = control
             pooledPlayer = newPlayer
             lastCodecKey = codecProfileKey
         }
 
         return PooledPlayerSession(
-            preloadManager = newPreloadManager,
-            statusControl = control,
             player = newPlayer,
             downmixAudioProcessor = sharedDownmixAudioProcessor,
             isPooled = shouldPool
@@ -131,10 +103,9 @@ object CyosPlayerHolder {
     fun prepareOnTap(
         context: Context,
         mediaItem: MediaItem,
-        playlist: List<MediaItem> = listOf(mediaItem),
-        currentIndex: Int = 0,
         resumeMs: Long = 0L,
-        codecProfileKey: String = "DEFAULT:${DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON}"
+        codecProfileKey: String = "DEFAULT:${DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON}",
+        batterySaverEnabled: Boolean = false
     ): Boolean {
         val appContext = context.applicationContext ?: context
         if (CyosFastPlayer.isLowRamDevice(appContext)) {
@@ -143,34 +114,18 @@ object CyosPlayerHolder {
         return runCatching {
             val session = getOrCreateSession(
                 context = appContext,
-                codecProfileKey = codecProfileKey
+                codecProfileKey = codecProfileKey,
+                batterySaverEnabled = batterySaverEnabled
             )
             if (!session.isPooled) return@runCatching false
 
-            val safePlaylist = if (playlist.isNotEmpty()) playlist else listOf(mediaItem)
-            val safeIndex = currentIndex.coerceIn(0, safePlaylist.lastIndex)
-            val startIdx = (safeIndex - 1).coerceAtLeast(0)
-            val endIdx = (safeIndex + 1).coerceAtMost(safePlaylist.lastIndex)
-            val windowUris = (startIdx..endIdx).mapNotNull { safePlaylist[it].localConfiguration?.uri }
-            if (windowUris != lastSubmittedUris) {
-                session.preloadManager.reset()
-                for (idx in startIdx..endIdx) {
-                    session.preloadManager.add(safePlaylist[idx], idx)
-                }
-                lastSubmittedUris = windowUris
-            }
-            session.statusControl.currentPlayingIndex = safeIndex
-            session.preloadManager.setCurrentPlayingIndex(safeIndex)
-            session.preloadManager.invalidate()
-
             CyosFastPlayer.playOnTap(
                 player = session.player,
-                preloadManager = session.preloadManager,
-                mediaItem = safePlaylist[safeIndex],
+                mediaItem = mediaItem,
                 resumeMs = resumeMs,
                 autoPlay = true
             )
-            lastPreparedUri = safePlaylist[safeIndex].localConfiguration?.uri
+            lastPreparedUri = mediaItem.localConfiguration?.uri
             lastPreparedPositionMs = resumeMs
             true
         }.getOrDefault(false)
@@ -192,6 +147,8 @@ object CyosPlayerHolder {
         runCatching {
             p.playWhenReady = false
             p.pause()
+            p.stop()
+            p.clearMediaItems()
         }
         lastPreparedUri = null
     }
@@ -200,6 +157,7 @@ object CyosPlayerHolder {
     @Synchronized
     fun trimOrReleaseOnMemoryPressure(context: Context, trimLevel: Int) {
         if (CyosFastPlayer.isLowRamDevice(context) ||
+            trimLevel >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
             trimLevel >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
             trimLevel >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
         ) {
@@ -218,14 +176,7 @@ object CyosPlayerHolder {
     private fun releaseInternal() {
         lastPreparedUri = null
         lastPreparedPositionMs = 0L
-        lastSubmittedUris = emptyList()
         lastCodecKey = ""
-        try {
-            preloadManager?.release()
-        } catch (_: Throwable) {
-        }
-        preloadManager = null
-        statusControl = null
         try {
             pooledPlayer?.release()
         } catch (_: Throwable) {

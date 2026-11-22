@@ -1,6 +1,6 @@
 {
   "name": "CyosPlay",
-  "description": "CyosPlay 1.07rv7b",
+  "description": "CyosPlay 1.08rv5",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API",

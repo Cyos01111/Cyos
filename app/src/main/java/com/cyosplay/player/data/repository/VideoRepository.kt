@@ -1542,7 +1542,7 @@ class VideoRepository(private val context: Context) {
             dateCreatedFormatted = dateCreatedStr,
             audioBitrateLabel = "192 kbps (192,000 bps)",
             isDataCodesLocked = isLocked,
-            masterPasswordLockBadge = "Locked with Master Password: a12@ #$%DQWaA2-=d,q./qweAS (AES-256-GCM)",
+            masterPasswordLockBadge = "Locked with Master Password (AES-256-GCM)",
             chromaSubsamplingBitDepth = com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.CHROMA_SUBSAMPLING_YUV420_8BIT_SPEC,
             avcProfileLevelLabel = com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.AVC1_MAIN_HIGH_PROFILE_LEVEL_30_31_SPEC,
             aacProfileLabel = com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.AUDIO_PROFILE_AAC_LC_MP4A_40_2_SPEC,

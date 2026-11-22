@@ -287,7 +287,7 @@ fun SettingsScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Low-RAM Smoothness Shield", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "Stays OFF by default until manually enabled; optimizes buffers & cache trimming when turned ON",
+                            "Stays OFF by default until manually enabled; enforces compact bounded buffers & memory trimming when turned ON",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -488,7 +488,7 @@ fun SettingsScreen(
                             )
                         }
                         Text(
-                            text = "Zero history, zero recent-apps screenshot (FLAG_SECURE), zero external media broadcasts, and automatic cache wipe on exit",
+                            text = "Zero history, zero recent-apps screenshot (FLAG_SECURE), zero external media broadcasts, and automatic ephemeral file cleanup on exit",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

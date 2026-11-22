@@ -13,10 +13,11 @@ import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import androidx.media3.exoplayer.upstream.DefaultAllocator
-import com.cyosplay.player.XvidSupportExtractorsFactory
 
+/**
+ * Direct, cache-free and preloader-free playlist player manager.
+ */
 @OptIn(UnstableApi::class)
 class CyosFastPlayerManager(
     context: Context,
@@ -28,16 +29,9 @@ class CyosFastPlayerManager(
 ) {
     private val appContext: Context = context.applicationContext ?: context
     private var currentItems: List<MediaItem> = emptyList()
+    private var currentPlayingIndex: Int = 0
 
-    val preloadStatusControl = CyosPreloadStatusControl(
-        currentPlayingIndex = 0,
-        isLowRamDevice = CyosFastPlayer.isLowRamDevice(appContext)
-    )
-
-    val mediaSourceFactory: DefaultMediaSourceFactory = DefaultMediaSourceFactory(
-        CyosMediaCache.buildCacheDataSourceFactory(appContext),
-        XvidSupportExtractorsFactory()
-    )
+    val mediaSourceFactory: DefaultMediaSourceFactory = CyosFastPlayer.createDirectMediaSourceFactory(appContext)
 
     val renderersFactory: DefaultRenderersFactory = CyosFastPlayer.createRenderersFactory(
         context = appContext,
@@ -48,36 +42,22 @@ class CyosFastPlayerManager(
 
     val loadControl: LoadControl = loadControlOverride ?: CyosFastPlayer.createLoadControl(appContext)
 
-    val preloadManager: DefaultPreloadManager
-    val player: ExoPlayer
-
-    init {
-        val preloadBuilder = CyosFastPlayer.createPreloadBuilder(
-            context = appContext,
-            statusControl = preloadStatusControl,
-            loadControl = loadControl,
-            renderersFactory = renderersFactory,
-            capNetworkStartupBitrate = false,
-            subtitlesEnabledByUser = subtitlesEnabledByUser
-        )
-
-        preloadManager = preloadBuilder.build()
-
-        player = preloadBuilder.buildExoPlayer(
-            CyosFastPlayer.createWarmExoPlayerBuilder(appContext)
-        ).apply {
-            videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-            videoChangeFrameRateStrategy = C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
-        }
+    val player: ExoPlayer = CyosFastPlayer.createDirectExoPlayer(
+        context = appContext,
+        loadControl = loadControl,
+        renderersFactory = renderersFactory,
+        capNetworkStartupBitrate = false,
+        subtitlesEnabledByUser = subtitlesEnabledByUser
+    ).apply {
+        videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+        videoChangeFrameRateStrategy = C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_ONLY_IF_SEAMLESS
     }
 
     fun submitPlaylist(items: List<MediaItem>) {
         currentItems = items
-        preloadManager.reset()
-        items.forEachIndexed { index, mediaItem ->
-            preloadManager.add(mediaItem, index)
+        if (currentPlayingIndex !in items.indices) {
+            currentPlayingIndex = 0
         }
-        preloadManager.invalidate()
     }
 
     fun playAtIndex(
@@ -86,13 +66,9 @@ class CyosFastPlayerManager(
         autoPlay: Boolean = true
     ) {
         if (index !in currentItems.indices) return
-        preloadStatusControl.currentPlayingIndex = index
-        preloadManager.setCurrentPlayingIndex(index)
-        preloadManager.invalidate()
-
+        currentPlayingIndex = index
         CyosFastPlayer.playOnTap(
             player = player,
-            preloadManager = preloadManager,
             mediaItem = currentItems[index],
             resumeMs = startPositionMs,
             autoPlay = autoPlay
@@ -101,14 +77,12 @@ class CyosFastPlayerManager(
 
     fun updateCurrentPlayingIndex(index: Int) {
         if (index !in currentItems.indices) return
-        preloadStatusControl.currentPlayingIndex = index
-        preloadManager.setCurrentPlayingIndex(index)
-        preloadManager.invalidate()
+        currentPlayingIndex = index
     }
 
     fun getCurrentPlaylistSize(): Int = currentItems.size
 
-    fun getCurrentPlayingIndex(): Int = preloadStatusControl.currentPlayingIndex
+    fun getCurrentPlayingIndex(): Int = currentPlayingIndex
 
     fun skipForward10s(): Long = skipForward10s(player)
 
@@ -116,17 +90,12 @@ class CyosFastPlayerManager(
 
     fun release() {
         try {
-            preloadManager.release()
-        } catch (_: Throwable) {
-        }
-        try {
             player.release()
         } catch (_: Throwable) {
         }
     }
 
     companion object {
-        const val PRELOAD_NEXT_DURATION_MS: Long = CyosPreloadStatusControl.PRELOAD_NEXT_DURATION_MS
         const val MIN_BUFFER_MS: Int = CyosFastPlayer.STANDARD_MIN_BUFFER_MS
         const val MAX_BUFFER_MS: Int = CyosFastPlayer.STANDARD_MAX_BUFFER_MS
         const val BUFFER_FOR_PLAYBACK_MS: Int = CyosFastPlayer.BUFFER_FOR_PLAYBACK_MS
@@ -136,14 +105,14 @@ class CyosFastPlayerManager(
 
         fun buildOptimizedLoadControl(
             chunkSizeBytes: Int = 64 * 1024,
-            targetBufferBytes: Int = C.LENGTH_UNSET,
+            targetBufferBytes: Int = CyosFastPlayer.STANDARD_TARGET_BUFFER_BYTES,
             minBufferMs: Int = MIN_BUFFER_MS,
             maxBufferMs: Int = MAX_BUFFER_MS,
             bufferForPlaybackMs: Int = BUFFER_FOR_PLAYBACK_MS,
             bufferForPlaybackAfterRebufferMs: Int = BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
             backBufferDurationMs: Int = BACK_BUFFER_DURATION_MS,
             retainBackBufferFromKeyframe: Boolean = true,
-            prioritizeTimeOverSizeThresholds: Boolean = true
+            prioritizeTimeOverSizeThresholds: Boolean = false
         ): DefaultLoadControl {
             val builder = DefaultLoadControl.Builder()
                 .setAllocator(DefaultAllocator(true, chunkSizeBytes))
