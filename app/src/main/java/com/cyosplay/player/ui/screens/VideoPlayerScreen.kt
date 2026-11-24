@@ -589,30 +589,19 @@ fun VideoPlayerScreen(
         uiState.forceHardwareAccelerationHighBitrate,
         uiState.lowRamShieldEnabled,
         memoryBudget.tier,
-        memoryBudget.batterySaverActive
+        memoryBudget.batterySaverActive,
+        com.cyos.player.CyosFastPlayer.isNetworkStreamUri(activeVideo.uri)
     ) {
-        val preferSw = (uiState.decoderEngineMode == DecoderEngineMode.SW ||
-            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
-            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE) &&
-            !uiState.forceHardwareAccelerationHighBitrate
-
-        val isSwEngine = uiState.decoderEngineMode == DecoderEngineMode.SW ||
-            uiState.decoderEngineMode == DecoderEngineMode.SW_PLUS ||
-            uiState.decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE
-
-        val codecSelector = com.cyosplay.player.createXvidAwareMediaCodecSelector(
-            fallbackSelector = AudioBadgeFormatter.createMultiCodecSelectorForEngine(
-                decoderEngineMode = uiState.decoderEngineMode,
-                forceHardwareForHighBitrate = uiState.forceHardwareAccelerationHighBitrate
-            ),
-            preferSoftwareForAllCodecs = isSwEngine
+        val (codecSelector, extMode) = VideoPlayerViewModel.resolveCodecSelectorAndExtensionMode(
+            decoderEngineMode = uiState.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = uiState.forceHardwareAccelerationHighBitrate
         )
-        val extMode = if (uiState.decoderEngineMode == DecoderEngineMode.HW && !preferSw) {
-            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-        } else {
-            DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
-        }
-        val codecProfileKey = "${uiState.decoderEngineMode.name}:${uiState.forceHardwareAccelerationHighBitrate}:${uiState.lowRamShieldEnabled}:${uiState.batterySaverModeEnabled}"
+        val codecProfileKey = VideoPlayerViewModel.buildCodecProfileKey(
+            decoderEngineMode = uiState.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = uiState.forceHardwareAccelerationHighBitrate,
+            lowRamShieldEnabled = uiState.lowRamShieldEnabled,
+            batterySaverModeEnabled = uiState.batterySaverModeEnabled
+        )
         com.cyos.player.CyosPlayerHolder.getOrCreateSession(
             context = context,
             mediaCodecSelector = codecSelector,
@@ -620,18 +609,29 @@ fun VideoPlayerScreen(
             codecProfileKey = codecProfileKey,
             subtitlesEnabledByUser = uiState.subtitlesEnabledByUser,
             forceLowRamMode = uiState.lowRamShieldEnabled,
-            batterySaverEnabled = uiState.batterySaverModeEnabled
+            batterySaverEnabled = uiState.batterySaverModeEnabled,
+            isNetworkStream = com.cyos.player.CyosFastPlayer.isNetworkStreamUri(activeVideo.uri)
         )
     }
+
+    var hasRenderedFirstFrameForVideo by remember(activeVideo.uri) { mutableStateOf(false) }
 
     val downmixProcessor = playerSession.downmixAudioProcessor
     LaunchedEffect(
         downmixProcessor,
+        hasRenderedFirstFrameForVideo,
         uiState.volumeBoostMultiplier,
         uiState.nightModeAudioEnabled,
         uiState.nightModeEnabled,
         uiState.dialogueEnhancerEnabled
     ) {
+        if (!hasRenderedFirstFrameForVideo &&
+            uiState.volumeBoostMultiplier == 1.0f &&
+            !uiState.nightModeAudioEnabled &&
+            !uiState.nightModeEnabled
+        ) {
+            return@LaunchedEffect
+        }
         downmixProcessor.volumeBoostMultiplier = uiState.volumeBoostMultiplier
         downmixProcessor.nightModeCompressionEnabled = uiState.nightModeAudioEnabled || uiState.nightModeEnabled
         downmixProcessor.dialogueEnhancerEnabled = uiState.dialogueEnhancerEnabled
@@ -723,6 +723,7 @@ fun VideoPlayerScreen(
                                 isMediaLoading = true
                             }
                         } else if (playbackState == Player.STATE_READY) {
+                            com.cyos.player.StartupLatencyTracker.markStateReady()
                             isMediaLoading = false
                             mediaErrorType = PlayerMediaErrorType.NONE
                             val dur = runCatching { exoPlayer.duration }.getOrDefault(C.TIME_UNSET)
@@ -919,6 +920,16 @@ fun VideoPlayerScreen(
                         )
                     }
 
+                    override fun onRenderedFirstFrame() {
+                        com.cyos.player.StartupLatencyTracker.markFirstFrameRendered()
+                        isMediaLoading = false
+                        if (!hasRenderedFirstFrameForVideo) {
+                            hasRenderedFirstFrameForVideo = true
+                            // Defer sidecar subtitle scanning & folder last-played IO until after first video frame paints
+                            viewModel.onPlayerFirstFrameRendered(activeVideo)
+                        }
+                    }
+
                     override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) {
                         val formatted = runCatching {
                             cueGroup.cues.mapNotNull { cue ->
@@ -935,19 +946,16 @@ fun VideoPlayerScreen(
     }
 
     LaunchedEffect(activeVideo.uri, playerSession) {
-        viewModel.discoverSidecarSubtitlesForVideo(activeVideo)
-
         val alreadyPreparedOnTap = com.cyos.player.CyosPlayerHolder.consumeMatchingPrePreparedUri(activeVideo.uri)
         if (alreadyPreparedOnTap) {
             com.cyos.player.CyosFastPlayer.applyBitratePolicyForUri(exoPlayer, activeVideo.uri)
             exoPlayer.playWhenReady = isPlaying
         } else {
-            // Detach and re-attach surface before loading the next item to prevent MediaCodec.configure()
-            // surface disconnect issues when switching between software-decoded (XVID/FFmpeg) and hardware-decoded videos
+            // Keep SurfaceView bound cleanly without tearing down or detaching the active surface
             activePlayerViewRef?.let { pv ->
-                if (pv.player === exoPlayer) {
-                    pv.player = null
+                if (pv.player !== exoPlayer) {
                     pv.player = exoPlayer
+                    com.cyos.player.StartupLatencyTracker.markSurfaceAttached()
                 }
             }
             val startPos = if (currentPositionMs > 0L && !uiState.stealthPlaybackEnabled) currentPositionMs else 0L
@@ -957,9 +965,6 @@ fun VideoPlayerScreen(
                 resumeMs = startPos,
                 autoPlay = isPlaying
             )
-        }
-        if (!uiState.stealthPlaybackEnabled) {
-            viewModel.settingsRepository.saveLastPlayedVideoForFolder(activeVideo.folderId, activeVideo.path)
         }
     }
 
@@ -2002,9 +2007,10 @@ fun VideoPlayerScreen(
                 }.getOrNull() ?: PlayerView(ctx)
                 inflatedView.apply {
                     useController = false
-                    player = null
                     player = exoPlayer
+                    activePlayerViewRef = this
                     lastBoundSurfaceVideoUri = activeVideo.uri
+                    com.cyos.player.StartupLatencyTracker.markSurfaceAttached()
                     subtitleView?.visibility = if (hasSelectedEmbeddedSubtitle) View.VISIBLE else View.GONE
                     // Large 24sp text at 75% opacity (0xBFFFFFFF), no background box (Color.TRANSPARENT), drop shadow
                     subtitleView?.setFixedTextSize(
@@ -2030,10 +2036,13 @@ fun VideoPlayerScreen(
                 }
             },
             update = { playerView ->
-                // Step 3: Handle surface switching when mixing software & hardware decoders
-                if (playerView.player !== exoPlayer || lastBoundSurfaceVideoUri != activeVideo.uri) {
-                    playerView.player = null
+                activePlayerViewRef = playerView
+                // Reuse SurfaceView cleanly without tearing down/detaching on normal video switches
+                if (playerView.player !== exoPlayer) {
                     playerView.player = exoPlayer
+                    com.cyos.player.StartupLatencyTracker.markSurfaceAttached()
+                }
+                if (lastBoundSurfaceVideoUri != activeVideo.uri) {
                     lastBoundSurfaceVideoUri = activeVideo.uri
                 }
                 val showEmbeddedView = hasSelectedEmbeddedSubtitle && activeMultiSubtitleCues.isEmpty()

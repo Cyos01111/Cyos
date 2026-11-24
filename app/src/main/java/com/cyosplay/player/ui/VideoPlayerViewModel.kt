@@ -56,11 +56,14 @@ import com.cyosplay.player.data.model.VideoSortOption
 import com.cyosplay.player.data.model.VideoProperties
 import com.cyosplay.player.data.model.VideoTechnicalDetails
 import com.cyosplay.player.data.model.MiniPlayerPositionPreset
+import com.cyosplay.player.data.repository.FolderNotificationStore
 import com.cyosplay.player.data.repository.PlaylistRepository
 import com.cyosplay.player.data.repository.RecycleBinRepository
 import com.cyosplay.player.data.repository.SettingsRepository
 import com.cyosplay.player.data.repository.VaultManager
 import com.cyosplay.player.data.repository.VideoRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.cyosplay.player.util.CryptoSecurityManager
 import com.cyosplay.player.util.MemoryBudgetConfig
 import com.cyosplay.player.util.MemoryManager
@@ -89,8 +92,8 @@ enum class MiniPlayerSizeMode {
 }
 
 data class VideoPlayerUiState(
-    val appVersionName: String = "1.08rv5",
-    val appDescription: String = "CyosPlay 1.08rv5",
+    val appVersionName: String = "1.08rv6",
+    val appDescription: String = "CyosPlay 1.08rv6",
     val aboutUsCreator: String = "Created by Tkm",
     val aboutUsCopyright: String = "© 2026 TKm. All rights reserved.",
     val currentNavTab: NavDestination = NavDestination.FOLDERS,
@@ -98,6 +101,8 @@ data class VideoPlayerUiState(
     val isLoading: Boolean = false,
     val allVideos: List<VideoItem> = emptyList(),
     val folders: List<VideoFolder> = emptyList(),
+    val unseenNewFolderIds: Set<String> = emptySet(),
+    val hasNewFolders: Boolean = false,
     val foldersWithNewVideos: Set<String> = emptySet(),
     val folderNewVideoCounts: Map<String, Int> = emptyMap(),
     val newVideoPaths: Set<String> = emptySet(),
@@ -226,9 +231,9 @@ data class VideoPlayerUiState(
     val eyeComfortWarmth: Float = 0.35f,
     val extraDimIntensity: Float = 0f,
     val showVisualComfortSheet: Boolean = false,
-    val themeMode: AppThemeMode = AppThemeMode.SYSTEM_AUTO,
+    val themeMode: AppThemeMode = AppThemeMode.AMOLED_BLACK,
     val fontMode: AppFontMode = AppFontMode.SYSTEM_DEFAULT,
-    val textScaleMode: AdaptiveTextScaleMode = AdaptiveTextScaleMode.NORMAL,
+    val textScaleMode: AdaptiveTextScaleMode = AdaptiveTextScaleMode.COMPACT,
     val resumePlaybackEnabled: Boolean = true,
     val autoPlayNextEnabled: Boolean = true,
     val hiddenFolderPaths: Set<String> = emptySet(),
@@ -268,7 +273,7 @@ data class VideoPlayerUiState(
     val miniPlayerOffsetY: Float = 0f,
     val miniPlayerPositionPreset: MiniPlayerPositionPreset = MiniPlayerPositionPreset.BOTTOM_CENTER,
     val detectedStreamFps: Float = 60f,
-    val autoSkipIntrosCredits: Boolean = true,
+    val autoSkipIntrosCredits: Boolean = false,
     val nightShieldWarmthLevel: Float = 0.38f,
     val miniPlayerSizeMode: MiniPlayerSizeMode = MiniPlayerSizeMode.COMPACT,
     val showHighVolumeBrightnessWarning: Boolean = false,
@@ -328,6 +333,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     private val appContext = application.applicationContext
     val settingsRepository = SettingsRepository(appContext)
     val videoRepository = VideoRepository(appContext)
+    val folderNotificationStore = FolderNotificationStore(appContext)
     val vaultManager = VaultManager(appContext)
     val playlistRepository = PlaylistRepository(appContext)
     val recycleBinRepository = RecycleBinRepository(appContext)
@@ -337,6 +343,8 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     private val navigationBackStack = ArrayDeque<Screen>()
     private var vaultAutoLockJob: kotlinx.coroutines.Job? = null
+    private var mediaStoreVideoObserver: android.database.ContentObserver? = null
+    private var deferredPostFrameJob: kotlinx.coroutines.Job? = null
     private var activeExoPlayerRef: java.lang.ref.WeakReference<androidx.media3.exoplayer.ExoPlayer>? = null
 
     fun registerActiveExoPlayer(player: androidx.media3.exoplayer.ExoPlayer) {
@@ -370,6 +378,115 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     companion object {
         const val VAULT_AUTO_LOCK_SECONDS = 10
         const val VAULT_AUTO_LOCK_TIMEOUT_MS = 10_000L
+
+        fun buildCodecProfileKey(
+            decoderEngineMode: DecoderEngineMode,
+            forceHardwareAccelerationHighBitrate: Boolean,
+            lowRamShieldEnabled: Boolean,
+            batterySaverModeEnabled: Boolean
+        ): String {
+            return "${decoderEngineMode.name}:$forceHardwareAccelerationHighBitrate:$lowRamShieldEnabled:$batterySaverModeEnabled"
+        }
+
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        fun resolveCodecSelectorAndExtensionMode(
+            decoderEngineMode: DecoderEngineMode,
+            forceHardwareAccelerationHighBitrate: Boolean
+        ): Pair<androidx.media3.exoplayer.mediacodec.MediaCodecSelector, Int> {
+            val isSwEngine = decoderEngineMode == DecoderEngineMode.SW ||
+                decoderEngineMode == DecoderEngineMode.SW_PLUS ||
+                decoderEngineMode == DecoderEngineMode.SOFTWARE_MULTI_CORE
+            val preferSw = isSwEngine && !forceHardwareAccelerationHighBitrate
+            val selector = com.cyosplay.player.createXvidAwareMediaCodecSelector(
+                fallbackSelector = com.cyosplay.player.util.AudioBadgeFormatter.createMultiCodecSelectorForEngine(
+                    decoderEngineMode = decoderEngineMode,
+                    forceHardwareForHighBitrate = forceHardwareAccelerationHighBitrate
+                ),
+                preferSoftwareForAllCodecs = preferSw
+            )
+            // Keep hardware-first EXTENSION_RENDERER_MODE_ON unless user explicitly forced SW/SW+.
+            val extMode = if (preferSw) {
+                androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+            } else {
+                androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            }
+            return selector to extMode
+        }
+    }
+
+    /**
+     * Registers a lifecycle-aware debounced ContentObserver on MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+     * so new video folders are detected live without polling or thrashing low-RAM devices.
+     */
+    fun startObservingMediaStoreVideos() {
+        if (mediaStoreVideoObserver != null) return
+        mediaStoreVideoObserver = videoRepository.registerDebouncedVideoObserver(
+            scope = viewModelScope,
+            debounceMs = 400L
+        ) {
+            refreshLibrary()
+        }
+    }
+
+    fun stopObservingMediaStoreVideos() {
+        videoRepository.unregisterVideoObserver(mediaStoreVideoObserver)
+        mediaStoreVideoObserver = null
+    }
+
+    /**
+     * Post-first-frame cold-launch ExoPlayer warm-up strictly gated to 3 GB+ RAM devices.
+     */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    fun warmUpPlayerAfterFirstFrame() {
+        val snap = _uiState.value
+        if (snap.lowRamShieldEnabled || snap.currentScreen is Screen.Player) return
+        val (selector, extMode) = resolveCodecSelectorAndExtensionMode(
+            decoderEngineMode = snap.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = snap.forceHardwareAccelerationHighBitrate
+        )
+        val profileKey = buildCodecProfileKey(
+            decoderEngineMode = snap.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = snap.forceHardwareAccelerationHighBitrate,
+            lowRamShieldEnabled = snap.lowRamShieldEnabled,
+            batterySaverModeEnabled = snap.batterySaverModeEnabled
+        )
+        com.cyos.player.CyosPlayerHolder.warmUpAfterFirstFrame(
+            context = appContext,
+            mediaCodecSelector = selector,
+            extensionRendererMode = extMode,
+            codecProfileKey = profileKey,
+            batterySaverEnabled = snap.batterySaverModeEnabled
+        )
+    }
+
+    private val recentlyClearedFolderBucketIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val recentlyClearedFolderPathKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Immediately clears the "New Video Folder" dot badge for [bucketId] in memory and
+     * persists the seen state asynchronously on Dispatchers.IO.
+     */
+    fun onFolderOpened(bucketId: String) {
+        val cleanId = bucketId.trim()
+        if (cleanId.isEmpty()) return
+        recentlyClearedFolderBucketIds.add(cleanId)
+        _uiState.update { state ->
+            val updatedUnseen = state.unseenNewFolderIds - cleanId
+            state.copy(
+                unseenNewFolderIds = updatedUnseen,
+                hasNewFolders = updatedUnseen.isNotEmpty(),
+                folders = state.folders.map { folder ->
+                    if (folder.bucketId == cleanId || folder.id == cleanId) {
+                        folder.copy(isNew = false)
+                    } else {
+                        folder
+                    }
+                }
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            folderNotificationStore.markFolderSeen(cleanId)
+        }
     }
 
     init {
@@ -492,115 +609,186 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         refreshLibrary()
     }
 
+    private var refreshLibraryJob: kotlinx.coroutines.Job? = null
+
     fun refreshLibrary() {
-        viewModelScope.launch {
+        refreshLibraryJob?.cancel()
+        refreshLibraryJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
-            val hiddenFolders = settingsRepository.getHiddenFolderPaths()
-            val recyclePaths = recycleBinRepository.getRecycleBinItems().map { it.originalPath }.toSet()
-            val vaultPaths = vaultManager.getVaultEntries(false).map { it.originalPath }.toSet() +
-                vaultManager.getVaultEntries(true).map { it.originalPath }.toSet()
+            val videoSortOpt = _uiState.value.videoSortOption
+            val videoSortDir = _uiState.value.videoSortDirection
+            val folderSortOpt = _uiState.value.folderSortOption
+            val folderSortDir = _uiState.value.folderSortDirection
+            val currentStorageFilter = _uiState.value.storageVolumeFilter
+            val existingDirPath = _uiState.value.currentDirectoryNode?.currentPath
 
-            val rawVideos = videoRepository.scanDeviceVideos(excludedPaths = recyclePaths + vaultPaths)
-                .filterNot { video -> hiddenFolders.contains(video.folderPath) }
+            val scanResult = withContext(Dispatchers.IO) {
+                val hiddenFolders = settingsRepository.getHiddenFolderPaths()
+                val recyclePaths = recycleBinRepository.getRecycleBinItems().map { it.originalPath }.toSet()
+                val vaultPaths = vaultManager.getVaultEntries(false).map { it.originalPath }.toSet() +
+                    vaultManager.getVaultEntries(true).map { it.originalPath }.toSet()
 
-            val baseSortedVideos = sortVideos(
-                rawVideos,
-                _uiState.value.videoSortOption,
-                _uiState.value.videoSortDirection
-            )
-            val seenCounts = settingsRepository.getSeenFolderVideoCounts().toMutableMap()
-            val activeNewFolders = settingsRepository.getFoldersWithNewVideos().toMutableSet()
-            val folderNewCounts = settingsRepository.getFolderNewVideoCounts().toMutableMap()
-            val newVideoPathSet = settingsRepository.getNewVideoPaths().toMutableSet()
+                val rawVideos = videoRepository.scanDeviceVideos(excludedPaths = recyclePaths + vaultPaths)
+                    .filterNot { video -> hiddenFolders.contains(video.folderPath) }
 
-            val rawFolders = videoRepository.groupVideosIntoFolders(baseSortedVideos)
-            rawFolders.forEach { folder ->
-                val normPath = folder.path.trim().trimEnd('/')
-                val normKey = normPath.lowercase()
-                val previousCount = seenCounts[normPath]
-                if (previousCount != null && folder.videoCount > previousCount) {
-                    val addedCount = (folder.videoCount - previousCount).coerceAtLeast(1)
-                    activeNewFolders.add(normPath)
-                    settingsRepository.markFolderHasNewVideo(normPath)
-                    val updatedFolderNewCount = (folderNewCounts[normKey] ?: 0).coerceAtLeast(addedCount)
-                    folderNewCounts[normKey] = updatedFolderNewCount
-                    settingsRepository.setFolderNewVideoCount(normPath, updatedFolderNewCount)
-                    folder.videos
-                        .sortedByDescending { it.dateModifiedSeconds }
-                        .take(addedCount)
-                        .forEach { newVid ->
-                            newVideoPathSet.add(newVid.path.trim())
-                            settingsRepository.markVideoPathAsNew(newVid.path)
-                        }
-                }
-                seenCounts[normPath] = folder.videoCount
-            }
-            settingsRepository.saveSeenFolderVideoCounts(seenCounts)
+                val baseSortedVideos = sortVideos(rawVideos, videoSortOpt, videoSortDir)
+                val seenCounts = settingsRepository.getSeenFolderVideoCounts().toMutableMap()
+                val activeNewFolders = settingsRepository.getFoldersWithNewVideos().toMutableSet()
+                val folderNewCounts = settingsRepository.getFolderNewVideoCounts().toMutableMap()
+                val newVideoPathSet = settingsRepository.getNewVideoPaths().toMutableSet()
 
-            val sortedVideos = baseSortedVideos.map { video ->
-                val isNew = newVideoPathSet.any { it.equals(video.path.trim(), ignoreCase = true) }
-                if (video.isNewVideo == isNew) video else video.copy(isNewVideo = isNew)
-            }
+                val rawFolders = videoRepository.groupVideosIntoFolders(baseSortedVideos)
+                val currentBucketIds = rawFolders.map { it.bucketId }.toSet()
+                val hasPermissionOrItems = videoRepository.hasVideoStoragePermission() || currentBucketIds.isNotEmpty()
+                val notificationState = folderNotificationStore.syncDiscoveredFolders(
+                    currentBucketIds = currentBucketIds,
+                    hasStoragePermission = hasPermissionOrItems
+                )
 
-            val groupedFolders = sortFolders(
-                rawFolders.map { folder ->
+                rawFolders.forEach { folder ->
                     val normPath = folder.path.trim().trimEnd('/')
                     val normKey = normPath.lowercase()
-                    val folderVideosWithNewFlag = folder.videos.map { v ->
-                        val isNew = newVideoPathSet.any { it.equals(v.path.trim(), ignoreCase = true) }
-                        if (v.isNewVideo == isNew) v else v.copy(isNewVideo = isNew)
+                    val previousCount = seenCounts[normPath]
+                    if (previousCount != null && folder.videoCount > previousCount) {
+                        val addedCount = (folder.videoCount - previousCount).coerceAtLeast(1)
+                        activeNewFolders.add(normPath)
+                        settingsRepository.markFolderHasNewVideo(normPath)
+                        val updatedFolderNewCount = (folderNewCounts[normKey] ?: 0).coerceAtLeast(addedCount)
+                        folderNewCounts[normKey] = updatedFolderNewCount
+                        settingsRepository.setFolderNewVideoCount(normPath, updatedFolderNewCount)
+                        folder.videos
+                            .sortedByDescending { it.dateModifiedSeconds }
+                            .take(addedCount)
+                            .forEach { newVid ->
+                                newVideoPathSet.add(newVid.path.trim())
+                                settingsRepository.markVideoPathAsNew(newVid.path)
+                            }
                     }
-                    val newInFolderCount = folderVideosWithNewFlag.count { it.isNewVideo }
-                    val persistedCount = folderNewCounts[normKey] ?: folderNewCounts[folder.id.lowercase()] ?: 0
-                    val hasNew = activeNewFolders.any {
-                        it.equals(normPath, ignoreCase = true) || it.equals(folder.id, ignoreCase = true)
-                    } || newInFolderCount > 0 || persistedCount > 0
-                    val badgeCount = maxOf(newInFolderCount, persistedCount, if (hasNew) 1 else 0)
-                    folder.copy(
-                        videos = folderVideosWithNewFlag,
-                        hasNewVideo = hasNew,
-                        newVideoCount = if (hasNew) badgeCount else 0
-                    )
-                },
-                _uiState.value.folderSortOption,
-                _uiState.value.folderSortDirection
-            )
-            val volumes = videoRepository.detectStorageVolumes()
-            val sdDetected = volumes.any { it.isRemovable }
-            val sdStatusLabel = if (sdDetected) "Detected" else "Not Detected"
-            val defaultRootForFilter = if (_uiState.value.storageVolumeFilter == StorageVolumeFilter.SD_CARD_ONLY) {
-                volumes.firstOrNull { it.isRemovable }?.rootPath ?: "/storage/sdcard1"
-            } else {
-                "/storage/emulated/0"
+                    seenCounts[normPath] = folder.videoCount
+                }
+                settingsRepository.saveSeenFolderVideoCounts(seenCounts)
+
+                val sortedVideos = baseSortedVideos.map { video ->
+                    val isNew = newVideoPathSet.any { it.equals(video.path.trim(), ignoreCase = true) }
+                    if (video.isNewVideo == isNew) video else video.copy(isNewVideo = isNew)
+                }
+
+                val groupedFolders = sortFolders(
+                    rawFolders.map { folder ->
+                        val normPath = folder.path.trim().trimEnd('/')
+                        val normKey = normPath.lowercase()
+                        val folderVideosWithNewFlag = folder.videos.map { v ->
+                            val isNew = newVideoPathSet.any { it.equals(v.path.trim(), ignoreCase = true) }
+                            if (v.isNewVideo == isNew) v else v.copy(isNewVideo = isNew)
+                        }
+                        val newInFolderCount = folderVideosWithNewFlag.count { it.isNewVideo }
+                        val persistedCount = folderNewCounts[normKey] ?: folderNewCounts[folder.id.lowercase()] ?: 0
+                        val isClearedByUser = recentlyClearedFolderPathKeys.contains(normKey) ||
+                            recentlyClearedFolderPathKeys.contains(folder.id.lowercase())
+                        val hasNew = if (isClearedByUser) {
+                            false
+                        } else {
+                            activeNewFolders.any {
+                                it.equals(normPath, ignoreCase = true) || it.equals(folder.id, ignoreCase = true)
+                            } || newInFolderCount > 0 || persistedCount > 0
+                        }
+                        val badgeCount = maxOf(newInFolderCount, persistedCount, if (hasNew) 1 else 0)
+                        val isUnseenNewBucket = folder.bucketId in notificationState.unseenNewFolderIds &&
+                            folder.bucketId !in recentlyClearedFolderBucketIds
+                        folder.copy(
+                            videos = folderVideosWithNewFlag,
+                            hasNewVideo = hasNew,
+                            newVideoCount = if (hasNew) badgeCount else 0,
+                            isNew = isUnseenNewBucket
+                        )
+                    },
+                    folderSortOpt,
+                    folderSortDir
+                )
+                val volumes = videoRepository.detectStorageVolumes()
+                val sdDetected = volumes.any { it.isRemovable }
+                val sdStatusLabel = if (sdDetected) "Detected" else "Not Detected"
+                val defaultRootForFilter = if (currentStorageFilter == StorageVolumeFilter.SD_CARD_ONLY) {
+                    volumes.firstOrNull { it.isRemovable }?.rootPath ?: "/storage/sdcard1"
+                } else {
+                    "/storage/emulated/0"
+                }
+                val currentRootPath = existingDirPath ?: defaultRootForFilter
+                val dirNode = videoRepository.buildStorageDirectoryNode(currentRootPath, sortedVideos)
+                val destinations = videoRepository.getAvailableMoveDestinations(groupedFolders)
+                val progressMap = settingsRepository.getAllPlaybackProgress()
+                val savedLastPath = settingsRepository.getLastPlayedVideoPath()
+                    ?: progressMap.values.maxByOrNull { it.updatedAtMs }?.videoPath
+                val refreshedCounts = settingsRepository.getFolderNewVideoCounts()
+                val playlists = playlistRepository.getPlaylists()
+                val favorites = playlistRepository.getFavoriteVideoPaths()
+                val recycleItems = recycleBinRepository.getRecycleBinItems()
+                val folderLastMap = settingsRepository.getAllFolderLastPlayedVideos()
+                val rotationCount = CryptoSecurityManager.getAutoRotationCount(appContext)
+                val crackAttempts = CryptoSecurityManager.getFailedCrackAttempts(appContext)
+
+                object {
+                    val sortedVideos = sortedVideos
+                    val groupedFolders = groupedFolders
+                    val notificationState = notificationState
+                    val activeNewFolders = activeNewFolders
+                    val refreshedCounts = refreshedCounts
+                    val newVideoPathSet = newVideoPathSet
+                    val volumes = volumes
+                    val sdDetected = sdDetected
+                    val sdStatusLabel = sdStatusLabel
+                    val dirNode = dirNode
+                    val destinations = destinations
+                    val playlists = playlists
+                    val favorites = favorites
+                    val recycleItems = recycleItems
+                    val progressMap = progressMap
+                    val savedLastPath = savedLastPath
+                    val folderLastMap = folderLastMap
+                    val rotationCount = rotationCount
+                    val crackAttempts = crackAttempts
+                }
             }
-            val currentRootPath = _uiState.value.currentDirectoryNode?.currentPath ?: defaultRootForFilter
-            val dirNode = videoRepository.buildStorageDirectoryNode(currentRootPath, sortedVideos)
-            val destinations = videoRepository.getAvailableMoveDestinations(groupedFolders)
-            val progressMap = settingsRepository.getAllPlaybackProgress()
-            val savedLastPath = settingsRepository.getLastPlayedVideoPath()
-                ?: progressMap.values.maxByOrNull { it.updatedAtMs }?.videoPath
 
             _uiState.update { state ->
+                val effectiveUnseenBuckets = scanResult.notificationState.unseenNewFolderIds - recentlyClearedFolderBucketIds
+                val effectiveFolders = scanResult.groupedFolders.map { folder ->
+                    val normKey = folder.path.trim().trimEnd('/').lowercase()
+                    val clearedFolder = recentlyClearedFolderPathKeys.contains(normKey) ||
+                        recentlyClearedFolderPathKeys.contains(folder.id.lowercase())
+                    val clearedBucket = folder.bucketId in recentlyClearedFolderBucketIds
+                    if (clearedFolder || clearedBucket) {
+                        folder.copy(
+                            hasNewVideo = if (clearedFolder) false else folder.hasNewVideo,
+                            newVideoCount = if (clearedFolder) 0 else folder.newVideoCount,
+                            isNew = if (clearedBucket) false else folder.isNew
+                        )
+                    } else {
+                        folder
+                    }
+                }
                 state.copy(
                     isLoading = false,
-                    allVideos = sortedVideos,
-                    folders = groupedFolders,
-                    foldersWithNewVideos = activeNewFolders,
-                    folderNewVideoCounts = settingsRepository.getFolderNewVideoCounts(),
-                    newVideoPaths = newVideoPathSet,
-                    storageVolumes = volumes,
-                    isSdCardDetected = sdDetected,
-                    sdCardStatusLabel = sdStatusLabel,
-                    currentDirectoryNode = dirNode,
-                    availableMoveDestinations = destinations,
-                    playlists = playlistRepository.getPlaylists(),
-                    favoriteVideoPaths = playlistRepository.getFavoriteVideoPaths(),
-                    recycleBinItems = recycleBinRepository.getRecycleBinItems(),
-                    playbackProgressMap = progressMap,
-                    lastPlayedVideoPath = savedLastPath,
-                    folderLastPlayedMap = settingsRepository.getAllFolderLastPlayedVideos(),
-                    autoKeyRotationCount = CryptoSecurityManager.getAutoRotationCount(appContext),
-                    failedCrackAttempts = CryptoSecurityManager.getFailedCrackAttempts(appContext)
+                    allVideos = scanResult.sortedVideos,
+                    folders = effectiveFolders,
+                    unseenNewFolderIds = effectiveUnseenBuckets,
+                    hasNewFolders = effectiveUnseenBuckets.isNotEmpty(),
+                    foldersWithNewVideos = scanResult.activeNewFolders,
+                    folderNewVideoCounts = scanResult.refreshedCounts,
+                    newVideoPaths = scanResult.newVideoPathSet,
+                    storageVolumes = scanResult.volumes,
+                    isSdCardDetected = scanResult.sdDetected,
+                    sdCardStatusLabel = scanResult.sdStatusLabel,
+                    currentDirectoryNode = scanResult.dirNode,
+                    availableMoveDestinations = scanResult.destinations,
+                    playlists = scanResult.playlists,
+                    favoriteVideoPaths = scanResult.favorites,
+                    recycleBinItems = scanResult.recycleItems,
+                    playbackProgressMap = scanResult.progressMap,
+                    lastPlayedVideoPath = scanResult.savedLastPath,
+                    folderLastPlayedMap = scanResult.folderLastMap,
+                    autoKeyRotationCount = scanResult.rotationCount,
+                    failedCrackAttempts = scanResult.crackAttempts
                 )
             }
         }
@@ -636,9 +824,42 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         videoRepository.saveManagedCatalog(current)
         settingsRepository.markVideoPathAsNew(video.path)
         val normFolder = video.folderPath.trim().trimEnd('/').lowercase()
+        recentlyClearedFolderPathKeys.remove(normFolder)
+        recentlyClearedFolderPathKeys.remove(video.folderId.lowercase())
         val nextCount = (settingsRepository.getFolderNewVideoCounts()[normFolder] ?: 0) + 1
         settingsRepository.setFolderNewVideoCount(video.folderPath, nextCount)
         settingsRepository.markFolderHasNewVideo(video.folderPath)
+
+        // Apply optimistic in-memory UI update immediately before background IO reconciliation
+        _uiState.update { state ->
+            val updatedVideos = sortVideos(
+                (listOf(flaggedVideo) + state.allVideos.filterNot { it.path.equals(video.path, ignoreCase = true) }),
+                state.videoSortOption,
+                state.videoSortDirection
+            )
+            val rawFolders = videoRepository.groupVideosIntoFolders(updatedVideos)
+            val updatedFolders = sortFolders(
+                rawFolders.map { folder ->
+                    val fNorm = folder.path.trim().trimEnd('/').lowercase()
+                    val isTargetFolder = fNorm == normFolder
+                    val newInFolder = folder.videos.count { it.isNewVideo }
+                    val hasNew = isTargetFolder || folder.hasNewVideo || newInFolder > 0
+                    val count = if (isTargetFolder) maxOf(nextCount, newInFolder, 1) else maxOf(folder.newVideoCount, newInFolder)
+                    folder.copy(
+                        hasNewVideo = hasNew,
+                        newVideoCount = if (hasNew) count else 0,
+                        isNew = folder.bucketId in state.unseenNewFolderIds
+                    )
+                },
+                state.folderSortOption,
+                state.folderSortDirection
+            )
+            state.copy(
+                allVideos = updatedVideos,
+                folders = updatedFolders,
+                newVideoPaths = state.newVideoPaths + video.path.trim()
+            )
+        }
         refreshLibrary()
     }
 
@@ -716,6 +937,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun clearFolderNewVideoIndicator(folderPathOrId: String) {
         val normalized = folderPathOrId.trim().trimEnd('/')
         if (normalized.isBlank()) return
+        recentlyClearedFolderPathKeys.add(normalized.lowercase())
         settingsRepository.clearFolderNewVideoIndicator(normalized)
         settingsRepository.clearFolderNewVideoCount(normalized)
         val updatedSet = settingsRepository.getFoldersWithNewVideos()
@@ -767,17 +989,25 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         if (current != screen) {
             navigationBackStack.addLast(current)
         }
-        val bookmarks = if (screen is Screen.Player) {
-            settingsRepository.getVideoBookmarks(screen.video.path)
-        } else {
-            emptyList()
-        }
         _uiState.update {
             it.copy(
                 currentScreen = screen,
-                activeVideoBookmarks = bookmarks,
+                activeVideoBookmarks = if (screen is Screen.Player) it.activeVideoBookmarks else emptyList(),
                 showHoldActionSheet = false
             )
+        }
+        if (screen is Screen.Player) {
+            val targetPath = screen.video.path
+            viewModelScope.launch(Dispatchers.IO) {
+                val bookmarks = settingsRepository.getVideoBookmarks(targetPath)
+                _uiState.update { state ->
+                    if ((state.currentScreen as? Screen.Player)?.video?.path == targetPath) {
+                        state.copy(activeVideoBookmarks = bookmarks)
+                    } else {
+                        state
+                    }
+                }
+            }
         }
     }
 
@@ -817,36 +1047,92 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    /**
+     * Zero-I/O hot path on video tap:
+     * 1. Records monotonic tap timestamp in StartupLatencyTracker (zero logs).
+     * 2. Reads resume position, brightness, volume & saved audio strictly from in-memory StateFlow maps.
+     * 3. Starts warm ExoPlayer immediately (playWhenReady = true, setMediaItem, prepare) BEFORE Compose transition.
+     * 4. Navigates to Screen.Player immediately; all sidecar subtitle discovery and preference writes
+     *    are deferred off the main thread onto Dispatchers.IO.
+     */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun playVideo(video: VideoItem, queue: List<VideoItem> = _uiState.value.allVideos) {
-        clearNewVideoDot(video.path)
-        if (!_uiState.value.stealthPlaybackEnabled) {
-            settingsRepository.setLastPlayedVideoPath(video.path)
-            if (video.folderId.isNotBlank()) {
-                settingsRepository.saveLastPlayedVideoForFolder(video.folderId, video.path)
-            }
-            if (video.folderPath.isNotBlank()) {
-                settingsRepository.saveLastPlayedVideoForFolder(video.folderPath, video.path)
-            }
-        }
+        com.cyos.player.StartupLatencyTracker.markVideoTap(video.uri)
+        val stateSnap = _uiState.value
+
+        // Resolve brightness, volume, audio & resume purely from in-memory StateFlow caches (zero disk I/O)
         val folderKey = video.folderPath.trim().trimEnd('/')
             .ifBlank { video.path.substringBeforeLast('/', "").trim().trimEnd('/') }
             .ifBlank { video.folderId.trim() }
-        val restoredFolderBrightness = settingsRepository.getSavedPlayerBrightnessForVideo(video.path, folderKey)
-        val restoredFolderVolume = settingsRepository.getSavedPlayerVolumeForVideo(video.path, folderKey)
-        val savedAudioSelection = settingsRepository.getSavedAudioTrackForVideo(video.path)
-        // Always start subtitles unselected until the user explicitly selects a subtitle track
-        settingsRepository.setSubtitlesEnabledByUser(false)
-        val discoveredSidecarTracks = discoverSidecarSubtitlesForVideo(video)
+        val normalizedVideoKey = video.path.trim()
+        val restoredBrightness = stateSnap.videoBrightnessMap[normalizedVideoKey]
+            ?: stateSnap.folderBrightnessMap[folderKey]
+            ?: stateSnap.savedPlayerBrightness
+        val restoredVolume = stateSnap.videoVolumeMap[normalizedVideoKey]
+            ?: stateSnap.folderVolumeMap[folderKey]
+            ?: stateSnap.savedPlayerVolume
+        val savedAudioSelection = stateSnap.videoAudioTrackMap[normalizedVideoKey]
+
+        val savedProgress = stateSnap.playbackProgressMap[video.path]
+        val savedPos = savedProgress?.lastPositionMs ?: 0L
+        val dur = video.durationMs.coerceAtLeast(savedProgress?.durationMs ?: 1000L)
+        val resumeMs = if (stateSnap.resumePlaybackEnabled && !stateSnap.stealthPlaybackEnabled && savedPos > 0L) {
+            if (dur > 5000L && savedPos >= dur - 2000L) 0L else savedPos
+        } else {
+            0L
+        }
+
+        // Start playback on the warm reused ExoPlayer BEFORE Compose navigation animation runs,
+        // using the exact same codecProfileKey and Xvid-aware selector as VideoPlayerScreen.
+        val codecProfileKey = buildCodecProfileKey(
+            decoderEngineMode = stateSnap.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate,
+            lowRamShieldEnabled = stateSnap.lowRamShieldEnabled,
+            batterySaverModeEnabled = stateSnap.batterySaverModeEnabled
+        )
+        val (codecSelector, extMode) = resolveCodecSelectorAndExtensionMode(
+            decoderEngineMode = stateSnap.decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate
+        )
+        com.cyos.player.CyosPlayerHolder.prepareOnTap(
+            context = getApplication(),
+            mediaItem = androidx.media3.common.MediaItem.fromUri(video.uri),
+            resumeMs = resumeMs,
+            codecProfileKey = codecProfileKey,
+            mediaCodecSelector = codecSelector,
+            extensionRendererMode = extMode,
+            forceLowRamMode = stateSnap.lowRamShieldEnabled,
+            batterySaverEnabled = stateSnap.batterySaverModeEnabled
+        )
+
+        val updatedFolderLastPlayed = if (stateSnap.stealthPlaybackEnabled) {
+            stateSnap.folderLastPlayedMap
+        } else {
+            buildMap {
+                putAll(stateSnap.folderLastPlayedMap)
+                if (video.folderId.isNotBlank()) put(video.folderId, video.path)
+                if (video.folderPath.isNotBlank()) put(video.folderPath, video.path)
+            }
+        }
+        val trimmedPath = video.path.trim()
+        val updatedNewVideoPaths = stateSnap.newVideoPaths.filterNot { it.equals(trimmedPath, ignoreCase = true) }.toSet()
+
         _uiState.update { state ->
             state.copy(
                 lastPlayedVideoPath = if (state.stealthPlaybackEnabled) null else video.path,
-                folderLastPlayedMap = settingsRepository.getAllFolderLastPlayedVideos(),
-                playbackProgressMap = settingsRepository.getAllPlaybackProgress(),
-                savedPlayerBrightness = restoredFolderBrightness,
-                savedPlayerVolume = restoredFolderVolume,
-                videoAudioTrackMap = settingsRepository.getAllSavedAudioTracks(),
+                folderLastPlayedMap = updatedFolderLastPlayed,
+                newVideoPaths = updatedNewVideoPaths,
+                allVideos = if (video.isNewVideo) {
+                    state.allVideos.map { v ->
+                        if (v.path.trim().equals(trimmedPath, ignoreCase = true)) v.copy(isNewVideo = false) else v
+                    }
+                } else {
+                    state.allVideos
+                },
+                savedPlayerBrightness = restoredBrightness,
+                savedPlayerVolume = restoredVolume,
                 isAudioMuted = savedAudioSelection?.isMuted ?: false,
-                externalSubtitleTracks = discoveredSidecarTracks,
+                externalSubtitleTracks = emptyList(),
                 externalSubtitleCues = emptyList(),
                 secondaryExternalSubtitleCues = emptyList(),
                 selectedExternalSubtitleTrackIds = emptySet(),
@@ -857,26 +1143,41 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 isMiniPlayerPlaying = false
             )
         }
-        val queueItems = if (queue.isNotEmpty()) queue else listOf(video)
-        val targetIndex = queueItems.indexOfFirst { it.path == video.path }.coerceAtLeast(0)
-        val savedProgress = settingsRepository.getPlaybackProgressForVideo(video.path)
-        val savedPos = savedProgress?.lastPositionMs ?: 0L
-        val dur = video.durationMs.coerceAtLeast(savedProgress?.durationMs ?: 1000L)
-        val resumeMs = if (_uiState.value.resumePlaybackEnabled && !_uiState.value.stealthPlaybackEnabled && savedPos > 0L) {
-            if (dur > 5000L && savedPos >= dur - 2000L) 0L else savedPos
-        } else {
-            0L
-        }
-        val stateSnap = _uiState.value
-        val codecProfileKey = "${stateSnap.decoderEngineMode.name}:${stateSnap.forceHardwareAccelerationHighBitrate}:${stateSnap.lowRamShieldEnabled}:${stateSnap.batterySaverModeEnabled}"
-        com.cyos.player.CyosPlayerHolder.prepareOnTap(
-            context = getApplication(),
-            mediaItem = androidx.media3.common.MediaItem.fromUri(video.uri),
-            resumeMs = resumeMs,
-            codecProfileKey = codecProfileKey,
-            batterySaverEnabled = stateSnap.batterySaverModeEnabled
-        )
+
+        com.cyos.player.StartupLatencyTracker.markNavigationStart()
         navigateTo(Screen.Player(video = video, playlistQueue = queue))
+
+        // Persist lightweight metadata asynchronously on Dispatchers.IO so zero disk I/O blocks video start
+        val stealth = stateSnap.stealthPlaybackEnabled
+        viewModelScope.launch(Dispatchers.IO) {
+            if (trimmedPath.isNotEmpty()) {
+                settingsRepository.clearNewVideoPath(trimmedPath)
+            }
+            settingsRepository.setSubtitlesEnabledByUser(false)
+            if (!stealth) {
+                settingsRepository.setLastPlayedVideoPath(video.path)
+                if (video.folderId.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(video.folderId, video.path)
+                }
+                if (video.folderPath.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(video.folderPath, video.path)
+                }
+            }
+        }
+    }
+
+    /**
+     * Runs non-critical post-first-frame work (sidecar subtitle scan + parsing & folder last-played sync)
+     * strictly on Dispatchers.IO AFTER Player.Listener.onRenderedFirstFrame fires.
+     */
+    fun onPlayerFirstFrameRendered(video: VideoItem) {
+        deferredPostFrameJob?.cancel()
+        deferredPostFrameJob = viewModelScope.launch(Dispatchers.IO) {
+            discoverSidecarSubtitlesForVideo(video)
+            if (!_uiState.value.stealthPlaybackEnabled && video.folderId.isNotBlank()) {
+                settingsRepository.saveLastPlayedVideoForFolder(video.folderId, video.path)
+            }
+        }
     }
 
     /**
@@ -1181,6 +1482,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun openFolderDetail(folder: VideoFolder) {
+        onFolderOpened(folder.bucketId)
         clearFolderNewVideoIndicator(folder.path)
         clearFolderNewVideoIndicator(folder.id)
         navigateTo(
@@ -1747,8 +2049,30 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 settingsRepository.setFolderNewVideoCount(finalFolderPath, nextCount)
                 settingsRepository.markFolderHasNewVideo(finalFolderPath)
             }
-            _uiState.update {
-                it.copy(
+            _uiState.update { state ->
+                val flaggedCopied = copied.map { it.copy(isNewVideo = true) }
+                val copiedPaths = flaggedCopied.map { it.path.lowercase() }.toSet()
+                val mergedVideos = sortVideos(
+                    flaggedCopied + state.allVideos.filterNot { it.path.lowercase() in copiedPaths },
+                    state.videoSortOption,
+                    state.videoSortDirection
+                )
+                val mergedFolders = sortFolders(
+                    videoRepository.groupVideosIntoFolders(mergedVideos).map { folder ->
+                        val newInFolder = folder.videos.count { it.isNewVideo }
+                        val hasNew = folder.hasNewVideo || newInFolder > 0
+                        folder.copy(
+                            hasNewVideo = hasNew,
+                            newVideoCount = if (hasNew) maxOf(folder.newVideoCount, newInFolder, 1) else 0,
+                            isNew = folder.bucketId in state.unseenNewFolderIds
+                        )
+                    },
+                    state.folderSortOption,
+                    state.folderSortDirection
+                )
+                state.copy(
+                    allVideos = mergedVideos,
+                    folders = mergedFolders,
                     isBrowserSelectionMode = false,
                     selectedFolderPaths = emptySet(),
                     selectedVideoPaths = emptySet(),
@@ -3225,6 +3549,8 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     override fun onCleared() {
+        stopObservingMediaStoreVideos()
+        deferredPostFrameJob?.cancel()
         vaultManager.wipeEphemeralPlaybackCache()
         super.onCleared()
     }

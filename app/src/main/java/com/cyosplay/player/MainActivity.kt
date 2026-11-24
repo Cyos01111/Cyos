@@ -234,6 +234,7 @@ open class MainActivity : FragmentActivity() {
                 contract = ActivityResultContracts.RequestMultiplePermissions()
             ) { permissionsMap ->
                 if (permissionsMap.values.any { it }) {
+                    viewModel.startObservingMediaStoreVideos()
                     viewModel.refreshLibrary()
                 }
             }
@@ -320,8 +321,14 @@ open class MainActivity : FragmentActivity() {
         viewModel.setInPipMode(isInPictureInPictureMode)
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.startObservingMediaStoreVideos()
+    }
+
     override fun onStop() {
         super.onStop()
+        viewModel.stopObservingMediaStoreVideos()
         val inPip = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) isInPictureInPictureMode else false
         if (!inPip) {
             viewModel.onAppBackgrounded()
@@ -407,6 +414,12 @@ fun CyosPlayRootApp(
         }
     }
 
+    // Post-first-frame cold-launch ExoPlayer warm-up strictly on 3 GB+ RAM devices (1-2 GB stays lazy)
+    LaunchedEffect(Unit) {
+        androidx.compose.runtime.withFrameNanos { }
+        viewModel.warmUpPlayerAfterFirstFrame()
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             bottomBar = {
@@ -424,7 +437,16 @@ fun CyosPlayRootApp(
                                         NavDestination.VAULT -> Icons.Default.Lock
                                         NavDestination.SETTINGS -> Icons.Default.Settings
                                     }
-                                    Icon(imageVector = icon, contentDescription = tab.label)
+                                    com.cyosplay.player.ui.components.NotificationDotAnchor(
+                                        showDot = tab == NavDestination.FOLDERS && uiState.hasNewFolders,
+                                        dotSize = 8.dp,
+                                        dotOffsetX = 3.dp,
+                                        dotOffsetY = (-3).dp,
+                                        dotTag = "folders_tab_new_dot",
+                                        dotContentDescription = "New video folders available"
+                                    ) {
+                                        Icon(imageVector = icon, contentDescription = tab.label)
+                                    }
                                 },
                                 label = { Text(tab.label) },
                                 modifier = Modifier.testTag("nav_tab_${tab.name.lowercase()}")

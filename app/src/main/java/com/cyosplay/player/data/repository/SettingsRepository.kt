@@ -409,8 +409,8 @@ class SettingsRepository(private val context: Context) {
     // --- Visual, Audio, Subtitle & Sorting Preferences (Encrypted) ---
 
     fun getThemeMode(): AppThemeMode {
-        val name = getDecrypted(KEY_THEME_MODE, AppThemeMode.SYSTEM_AUTO.name)
-        return AppThemeMode.entries.find { it.name == name } ?: AppThemeMode.SYSTEM_AUTO
+        val name = getDecrypted(KEY_THEME_MODE, AppThemeMode.AMOLED_BLACK.name)
+        return AppThemeMode.entries.find { it.name == name } ?: AppThemeMode.AMOLED_BLACK
     }
 
     fun setThemeMode(mode: AppThemeMode) = putEncrypted(KEY_THEME_MODE, mode.name)
@@ -423,8 +423,8 @@ class SettingsRepository(private val context: Context) {
     fun setFontMode(mode: AppFontMode) = putEncrypted(KEY_FONT_MODE, mode.name)
 
     fun getTextScaleMode(): AdaptiveTextScaleMode {
-        val name = getDecrypted(KEY_TEXT_SCALE_MODE, AdaptiveTextScaleMode.NORMAL.name)
-        return AdaptiveTextScaleMode.entries.find { it.name == name } ?: AdaptiveTextScaleMode.NORMAL
+        val name = getDecrypted(KEY_TEXT_SCALE_MODE, AdaptiveTextScaleMode.COMPACT.name)
+        return AdaptiveTextScaleMode.entries.find { it.name == name } ?: AdaptiveTextScaleMode.COMPACT
     }
 
     fun setTextScaleMode(mode: AdaptiveTextScaleMode) = putEncrypted(KEY_TEXT_SCALE_MODE, mode.name)
@@ -984,7 +984,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun isAutoSkipIntrosCreditsEnabled(): Boolean {
-        return getDecrypted(KEY_AUTO_SKIP_INTROS_CREDITS, "true").toBooleanStrictOrNull() ?: true
+        return getDecrypted(KEY_AUTO_SKIP_INTROS_CREDITS, "false").toBooleanStrictOrNull() ?: false
     }
 
     fun setAutoSkipIntrosCreditsEnabled(enabled: Boolean) {

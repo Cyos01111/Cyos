@@ -12,8 +12,8 @@ android {
         applicationId = "com.cyosplay.player"
         minSdk = 24
         targetSdk = 36
-        versionCode = 47
-        versionName = "1.08rv5"
+        versionCode = 48
+        versionName = "1.08rv6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MAJOR_CAPABILITY_ID", "\"cyos play\"")

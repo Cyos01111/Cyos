@@ -72,7 +72,8 @@ object MemoryManager {
         val isSystemLowRam = (activityManager?.isLowRamDevice == true) || memInfo.lowMemory
 
         val tier = when {
-            forceLowRamMode -> RamPerformanceTier.ULTRA_LOW_RAM
+            forceLowRamMode || isSystemLowRam || totalMb <= 2200L -> RamPerformanceTier.ULTRA_LOW_RAM
+            totalMb <= 3600L -> RamPerformanceTier.LOW_RAM
             totalMb <= 6500L -> RamPerformanceTier.STANDARD_RAM
             else -> RamPerformanceTier.HIGH_RAM
         }
@@ -91,15 +92,15 @@ object MemoryManager {
                 totalRamMb = totalMb,
                 availableRamMb = availMb,
                 isLowRamDeviceFlag = true,
-                minBufferMs = 8_000,
-                maxBufferMs = 16_000,
-                bufferForPlaybackMs = 600,
-                bufferForPlaybackAfterRebufferMs = 1_500,
+                minBufferMs = 6_000,
+                maxBufferMs = 14_000,
+                bufferForPlaybackMs = 180,
+                bufferForPlaybackAfterRebufferMs = 1_200,
                 targetBufferBytes = 6 * 1024 * 1024, // 6 MB strict cap in 64 KB chunks
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = 6_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = false,
+                prioritizeTimeOverSizeThresholds = true,
                 thumbnailMaxDimensionPx = 180,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = true,
@@ -113,13 +114,13 @@ object MemoryManager {
                 isLowRamDeviceFlag = isSystemLowRam,
                 minBufferMs = 8_000,
                 maxBufferMs = 16_000,
-                bufferForPlaybackMs = 600,
-                bufferForPlaybackAfterRebufferMs = 1_500,
+                bufferForPlaybackMs = 180,
+                bufferForPlaybackAfterRebufferMs = 1_200,
                 targetBufferBytes = 12 * 1024 * 1024, // 12 MB strict cap on low RAM
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = 8_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = false,
+                prioritizeTimeOverSizeThresholds = true,
                 thumbnailMaxDimensionPx = 220,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -131,15 +132,15 @@ object MemoryManager {
                 totalRamMb = totalMb,
                 availableRamMb = availMb,
                 isLowRamDeviceFlag = false,
-                minBufferMs = 12_000,
-                maxBufferMs = if (batterySaverEnabled) 18_000 else 24_000,
-                bufferForPlaybackMs = 600,
-                bufferForPlaybackAfterRebufferMs = 1_500,
-                targetBufferBytes = if (batterySaverEnabled) 16 * 1024 * 1024 else 24 * 1024 * 1024,
+                minBufferMs = 10_000,
+                maxBufferMs = if (batterySaverEnabled) 16_000 else 22_000,
+                bufferForPlaybackMs = 180,
+                bufferForPlaybackAfterRebufferMs = 1_200,
+                targetBufferBytes = if (batterySaverEnabled) 14 * 1024 * 1024 else 20 * 1024 * 1024,
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = if (batterySaverEnabled) 6_000 else 10_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = false,
+                prioritizeTimeOverSizeThresholds = true,
                 thumbnailMaxDimensionPx = if (batterySaverEnabled) 240 else 300,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -152,14 +153,14 @@ object MemoryManager {
                 availableRamMb = availMb,
                 isLowRamDeviceFlag = false,
                 minBufferMs = 12_000,
-                maxBufferMs = if (batterySaverEnabled) 18_000 else 24_000,
-                bufferForPlaybackMs = 600,
-                bufferForPlaybackAfterRebufferMs = 1_500,
-                targetBufferBytes = if (batterySaverEnabled) 20 * 1024 * 1024 else 32 * 1024 * 1024,
+                maxBufferMs = if (batterySaverEnabled) 18_000 else 28_000,
+                bufferForPlaybackMs = 180,
+                bufferForPlaybackAfterRebufferMs = 1_200,
+                targetBufferBytes = if (batterySaverEnabled) 18 * 1024 * 1024 else 30 * 1024 * 1024,
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
-                backBufferDurationMs = if (batterySaverEnabled) 6_000 else 10_000,
+                backBufferDurationMs = if (batterySaverEnabled) 6_000 else 15_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = false,
+                prioritizeTimeOverSizeThresholds = true,
                 thumbnailMaxDimensionPx = if (batterySaverEnabled) 260 else 360,
                 useRgb565Thumbnails = batterySaverEnabled,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -167,6 +168,11 @@ object MemoryManager {
                 batterySaverActive = batterySaverEnabled
             )
         }
+    }
+
+    fun shouldPreWarmExoPlayer(context: Context): Boolean {
+        val budget = detectMemoryBudget(context)
+        return !budget.isLowRamDeviceFlag && budget.totalRamMb >= 3072L
     }
 
     fun performEmergencyMemoryTrim(context: Context) {

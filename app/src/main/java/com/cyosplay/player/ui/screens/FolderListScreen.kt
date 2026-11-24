@@ -115,6 +115,7 @@ import com.cyosplay.player.ui.components.FfmpegCodecRegistryInspectorDialog
 import com.cyosplay.player.ui.components.FolderVideoCollagePreview
 import com.cyosplay.player.ui.components.HoldSelectionActionBar
 import com.cyosplay.player.ui.components.LargeFileTransferProgressBanner
+import com.cyosplay.player.ui.components.NotificationDotAnchor
 import com.cyosplay.player.ui.components.PrivacyAndPerformanceStatusStrip
 import com.cyosplay.player.ui.components.SinglePlaceInspectorTextCard
 import com.cyosplay.player.ui.components.TapToSeeSinglePlaceTextBox
@@ -583,11 +584,19 @@ fun FolderListScreen(
                                 },
                                 label = { Text("Folders (${filteredFolders.size})") },
                                 leadingIcon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Folder,
-                                        contentDescription = "Folders",
-                                        modifier = Modifier.size(16.dp)
-                                    )
+                                    NotificationDotAnchor(
+                                        showDot = uiState.hasNewFolders,
+                                        dotSize = 7.dp,
+                                        dotOffsetX = 3.dp,
+                                        dotOffsetY = (-3).dp,
+                                        dotTag = "header_folders_new_dot"
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Folder,
+                                            contentDescription = "Folders",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 },
                                 modifier = Modifier.weight(1f)
                             )
@@ -1924,13 +1933,23 @@ fun FolderGridCard(
             .testTag("folder_grid_item_${folder.id}")
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
-            FolderVideoCollagePreview(
-                folder = folder,
-                showCollagePreview = visibleFields.showFolderCollagePreview,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(106.dp)
-            )
+            NotificationDotAnchor(
+                showDot = folder.isNew,
+                dotSize = 8.dp,
+                dotOffsetX = 2.dp,
+                dotOffsetY = (-2).dp,
+                dotTag = "folder_new_badge_dot_${folder.bucketId}",
+                dotContentDescription = "New video folder",
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                FolderVideoCollagePreview(
+                    folder = folder,
+                    showCollagePreview = visibleFields.showFolderCollagePreview,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(106.dp)
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
             if (hideAllTexts) {
                 val consolidatedFolderText = buildString {
@@ -2081,14 +2100,23 @@ fun FolderCardRow(
                 .padding(if (isCompact) 10.dp else 14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 2x2 Video Frame Collage Preview inside Folder Card
-            FolderVideoCollagePreview(
-                folder = folder,
-                showCollagePreview = visibleFields.showFolderCollagePreview,
-                modifier = Modifier
-                    .width(collageWidth)
-                    .height(collageHeight)
-            )
+            // 2x2 Video Frame Collage Preview inside Folder Card with top-right New Folder Dot Badge
+            NotificationDotAnchor(
+                showDot = folder.isNew,
+                dotSize = 8.dp,
+                dotOffsetX = 3.dp,
+                dotOffsetY = (-3).dp,
+                dotTag = "folder_new_badge_dot_${folder.bucketId}",
+                dotContentDescription = "New video folder"
+            ) {
+                FolderVideoCollagePreview(
+                    folder = folder,
+                    showCollagePreview = visibleFields.showFolderCollagePreview,
+                    modifier = Modifier
+                        .width(collageWidth)
+                        .height(collageHeight)
+                )
+            }
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
                 if (hideAllTexts) {

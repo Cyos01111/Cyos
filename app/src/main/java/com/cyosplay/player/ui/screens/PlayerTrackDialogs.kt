@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -43,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.cyosplay.player.data.model.AudioTrackInfo
 import com.cyosplay.player.data.model.DecoderEngineMode
@@ -133,21 +135,25 @@ fun AudioTracksAndDecoderDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Available Audio Tracks (${displayTracks.size})",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     displayTracks.forEach { track ->
                         val selected = track.isSelected && !isAudioMuted
                         Card(
+                            shape = RoundedCornerShape(10.dp),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (selected) {
                                     MaterialTheme.colorScheme.primaryContainer
@@ -161,23 +167,31 @@ fun AudioTracksAndDecoderDialog(
                                 .testTag("audio_track_option_${track.groupIndex}_${track.trackIndex}")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Filled.VolumeUp,
                                     contentDescription = null,
-                                    tint = if (selected) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant
+                                    tint = if (selected) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
                                     Text(
                                         text = track.label,
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                     Row(
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Surface(
@@ -189,28 +203,36 @@ fun AudioTracksAndDecoderDialog(
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = EmeraldVault,
                                                 fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
                                             )
                                         }
                                         val chDesc = when {
-                                            track.channelCount >= 8 -> "7.1 Surround"
-                                            track.channelCount >= 6 -> "5.1 Surround"
-                                            track.channelCount == 2 -> "Stereo 2.0"
-                                            track.channelCount == 1 -> "Mono 1.0"
+                                            track.channelCount >= 8 -> "7.1"
+                                            track.channelCount >= 6 -> "5.1"
+                                            track.channelCount == 2 -> "2.0"
+                                            track.channelCount == 1 -> "1.0"
                                             else -> "${track.channelCount}ch"
                                         }
+                                        val srKhz = (track.sampleRate.takeIf { it > 0 } ?: 48000) / 1000.0
+                                        val srLabel = if (srKhz % 1.0 == 0.0) "${srKhz.toInt()} kHz" else String.format(java.util.Locale.US, "%.1f kHz", srKhz)
                                         Text(
-                                            text = "$chDesc • ${track.sampleRate.takeIf { it > 0 } ?: 48000} Hz",
+                                            text = "$chDesc • $srLabel",
                                             style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
                                 }
                                 if (selected) {
+                                    Spacer(modifier = Modifier.width(6.dp))
                                     Icon(
                                         imageVector = Icons.Default.Check,
                                         contentDescription = "Selected Audio Track",
-                                        tint = ElectricCyan
+                                        tint = ElectricCyan,
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -218,6 +240,7 @@ fun AudioTracksAndDecoderDialog(
                     }
 
                     Card(
+                        shape = RoundedCornerShape(10.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = if (isAudioMuted) {
                                 MaterialTheme.colorScheme.errorContainer
@@ -231,23 +254,32 @@ fun AudioTracksAndDecoderDialog(
                             .testTag("audio_track_mute_option")
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.VolumeOff,
                                 contentDescription = null,
-                                tint = if (isAudioMuted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = if (isAudioMuted) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (isAudioMuted) "Audio Track Muted (Tap to Unmute)" else "Disable / Mute Audio Stream",
-                                style = MaterialTheme.typography.bodyMedium,
+                                text = if (isAudioMuted) "Audio Muted (Tap to Unmute)" else "Mute Audio Stream",
+                                style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f)
                             )
                             if (isAudioMuted) {
-                                Icon(Icons.Default.Check, contentDescription = "Muted")
+                                Icon(
+                                    Icons.Default.Check,
+                                    contentDescription = "Muted",
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
                     }

@@ -1,6 +1,7 @@
 package io.github.anilbeesetti.nextlib.media3ext.ffdecoder
 
 import android.content.Context
+import android.os.Build
 import androidx.annotation.OptIn
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.audio.AudioProcessor
@@ -12,20 +13,23 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 
 /**
- * Media3 RenderersFactory that registers software video and audio decoders (including
- * MPEG-4 Part 2 / XVID packed B-frame software decoding via c2.android.mpeg4.decoder /
- * OMX.google.mpeg4.decoder and custom AudioProcessor pipelines) with automatic decoder fallback.
+ * Hardware-first Media3 RenderersFactory (`EXTENSION_RENDERER_MODE_ON`) with async MediaCodec
+ * queueing on API 23+ and targeted software-decoder priority strictly for legacy MPEG-4 Part 2 /
+ * Xvid / DivX packed B-frame streams (`video/mp4v-es`), plus automatic decoder fallback.
  */
 @OptIn(UnstableApi::class)
 open class NextRenderersFactory(
     context: Context,
     private val customAudioProcessors: Array<AudioProcessor> = emptyArray()
-) : DefaultRenderersFactory(context.applicationContext) {
+) : DefaultRenderersFactory(context.applicationContext ?: context) {
 
     init {
         setEnableDecoderFallback(true)
-        setExtensionRendererMode(EXTENSION_RENDERER_MODE_PREFER)
+        setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
         setMediaCodecSelector(createXvidAwareSelector(MediaCodecSelector.DEFAULT))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            forceEnableMediaCodecAsynchronousQueueing()
+        }
     }
 
     override fun buildAudioSink(
@@ -57,10 +61,11 @@ open class NextRenderersFactory(
                     mimeType.equals("video/xvid", ignoreCase = true)
                 ) {
                     // Put software decoders (c2.android.mpeg4.decoder / OMX.google.mpeg4.decoder) first
-                    // so packed B-frames (DivX503b1393p / MPEG-4 ASP Level 5) never fail or render a black screen.
+                    // so packed B-frames (DivX503b1393p / MPEG-4 ASP Level 5) never fail or render black.
                     decoders.sortedBy { info: MediaCodecInfo -> info.hardwareAccelerated }
                 } else {
-                    decoders
+                    // Keep hardware decoders first for H.264 / HEVC / VP9 / AV1 / AAC / Opus.
+                    decoders.sortedByDescending { info: MediaCodecInfo -> info.hardwareAccelerated }
                 }
             }
         }

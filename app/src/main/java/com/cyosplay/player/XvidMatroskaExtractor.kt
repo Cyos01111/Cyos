@@ -55,7 +55,7 @@ class XvidSupportExtractorsFactory : ExtractorsFactory {
                 DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS or
                 DefaultTsPayloadReaderFactory.FLAG_ENABLE_HDMV_DTS_AUDIO_STREAMS
         )
-        .setTsExtractorTimestampSearchBytes(1_024 * 1_024)
+        .setTsExtractorTimestampSearchBytes(256 * 1_024)
 
     override fun createExtractors(): Array<Extractor> {
         return defaultFactory.createExtractors().map { extractor ->
@@ -381,16 +381,14 @@ fun createXvidAwareMediaCodecSelector(
         if (preferSoftwareForAllCodecs ||
             mimeType == MimeTypes.VIDEO_MP4V ||
             mimeType == MimeTypes.VIDEO_DIVX ||
-            mimeType == MimeTypes.VIDEO_FLV ||
-            mimeType == MimeTypes.VIDEO_MPEG ||
             mimeType.contains("mp4v", ignoreCase = true) ||
             mimeType.contains("xvid", ignoreCase = true) ||
             mimeType.contains("divx", ignoreCase = true)
         ) {
-            // Put software decoders first for SW fallback or legacy packed-B-frame/Xvid/DivX/FLV streams
+            // Put software decoders first strictly for SW fallback or legacy Xvid/DivX/MPEG-4 Part 2 packed B-frames
             decoders.sortedBy { info: MediaCodecInfo -> info.hardwareAccelerated }
         } else {
-            // Keep hardware-accelerated decoders first for H.264/HEVC/VP9/AV1/AAC/Opus to minimize CPU & battery drain
+            // Keep hardware-accelerated decoders first for H.264/HEVC/VP9/AV1/AAC/Opus to minimize startup latency & CPU drain
             decoders.sortedByDescending { info: MediaCodecInfo -> info.hardwareAccelerated }
         }
     }
@@ -403,7 +401,7 @@ fun buildCyosExoPlayer(
     baseCodecSelector: MediaCodecSelector = MediaCodecSelector.DEFAULT,
     trackSelector: TrackSelector? = null,
     loadControl: LoadControl? = null,
-    extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER,
+    extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
     decoderEngineMode: com.cyosplay.player.data.model.DecoderEngineMode = com.cyosplay.player.data.model.DecoderEngineMode.HW_PLUS
 ): ExoPlayer {
     val appCtx = context.applicationContext ?: context
@@ -411,17 +409,20 @@ fun buildCyosExoPlayer(
         decoderEngineMode == com.cyosplay.player.data.model.DecoderEngineMode.SW_PLUS ||
         decoderEngineMode == com.cyosplay.player.data.model.DecoderEngineMode.SOFTWARE_MULTI_CORE
 
-    // 1. Prefer software decoder for SW/SW+ or MPEG-4 Part 2 (Xvid) to avoid hardware B-frame black screen
+    // 1. Hardware-first for modern codecs; software-first strictly for SW/SW+ or MPEG-4 Part 2 (Xvid)
     val xvidAwareSelector = createXvidAwareMediaCodecSelector(
         fallbackSelector = baseCodecSelector,
         preferSoftwareForAllCodecs = isSwEngine
     )
 
-    // 2. Use NextRenderersFactory to register FFmpeg/software video & audio decoders + fallback
+    // 2. Use NextRenderersFactory with hardware-first EXTENSION_RENDERER_MODE_ON + API 23+ async queueing
     val renderersFactory = NextRenderersFactory(appCtx, customAudioProcessors)
         .setMediaCodecSelector(xvidAwareSelector)
         .setEnableDecoderFallback(true)
         .setExtensionRendererMode(extensionRendererMode)
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+        renderersFactory.forceEnableMediaCodecAsynchronousQueueing()
+    }
 
     // 3. Use direct zero-cache DataSource + XvidSupportExtractorsFactory for local/HTTP playback & XVID csd-0 recovery
     val mediaSourceFactory = DefaultMediaSourceFactory(

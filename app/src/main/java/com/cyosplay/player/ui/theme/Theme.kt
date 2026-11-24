@@ -104,9 +104,9 @@ private val SolarGoldScheme = AmoledDarkScheme.copy(
 
 @Composable
 fun CyosPlayTheme(
-    themeMode: AppThemeMode = AppThemeMode.DARK_CINEMA,
+    themeMode: AppThemeMode = AppThemeMode.AMOLED_BLACK,
     fontMode: AppFontMode = AppFontMode.SYSTEM_DEFAULT,
-    textScaleMode: AdaptiveTextScaleMode = AdaptiveTextScaleMode.NORMAL,
+    textScaleMode: AdaptiveTextScaleMode = AdaptiveTextScaleMode.COMPACT,
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()

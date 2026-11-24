@@ -15,7 +15,7 @@ import org.gradle.api.GradleException
 
 val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignatureAndEncryption") {
     group = "verification"
-    description = "Verifies release APK JAR/APK signatures, optionally seals AES-256-GCM integrity metadata when Secrets are configured, and exports CyosPlay-1.08rv5-release.apk to export/."
+    description = "Verifies release APK JAR/APK signatures, optionally seals AES-256-GCM integrity metadata when Secrets are configured, and exports CyosPlay-1.08rv6-release.apk to export/."
 
     doLast {
         fun resolveSecret(name: String): String? {
@@ -43,8 +43,8 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             return null
         }
 
-        val releaseVersionName = "1.08rv5"
-        val releaseVersionCode = 47
+        val releaseVersionName = "1.08rv6"
+        val releaseVersionCode = 48
         val releaseKeystorePath = resolveSecret("CYOSPLAY_RELEASE_KEYSTORE_PATH") ?: "cyosplay-release.keystore"
         val releaseKeyAlias = resolveSecret("CYOSPLAY_RELEASE_KEY_ALIAS") ?: "cyosplay_release"
         val releaseKeystorePassword = resolveSecret("CYOSPLAY_RELEASE_STORE_PASSWORD")

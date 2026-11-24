@@ -10,11 +10,14 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.cyosplay.player.util.Eac3DownmixAudioProcessor
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 
 /**
- * Lightweight, cache-free and preloader-free ExoPlayer session manager.
- * Eliminates background preloading queues and immediately clears idle media buffers on detach
- * to maintain flat RAM usage and minimal battery consumption.
+ * Lightweight, cache-free and preloader-free singleton ExoPlayer session manager.
+ * - Supports post-first-frame cold-launch warm-up strictly on 3 GB+ RAM devices.
+ * - Starts playback immediately on tap across all RAM tiers with unified codec profile keys
+ *   so VideoPlayerScreen reuses the exact warm ExoPlayer without recreating decoders or surfaces.
+ * - Clears idle media items on detach and releases aggressively on background/memory trim.
  */
 @OptIn(UnstableApi::class)
 object CyosPlayerHolder {
@@ -37,26 +40,59 @@ object CyosPlayerHolder {
     @Volatile
     private var lastCodecKey: String = ""
 
+    @Volatile
+    private var lastNetworkMode: Boolean = false
+
     val sharedDownmixAudioProcessor: Eac3DownmixAudioProcessor = Eac3DownmixAudioProcessor()
+
+    /**
+     * Pre-warms the singleton ExoPlayer asynchronously after the first Compose frame draws,
+     * strictly gated to 3 GB+ RAM devices so 1 GB–2 GB devices stay zero-overhead until tap.
+     */
+    @Synchronized
+    fun warmUpAfterFirstFrame(
+        context: Context,
+        mediaCodecSelector: MediaCodecSelector = NextRenderersFactory.createXvidAwareSelector(),
+        extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
+        codecProfileKey: String = "AUTO_HW_PLUS:false:false:false",
+        batterySaverEnabled: Boolean = false
+    ): Boolean {
+        val appContext = context.applicationContext ?: context
+        if (pooledPlayer != null) return true
+        if (!CyosFastPlayer.isEligibleForColdLaunchWarmUp(appContext)) {
+            return false
+        }
+        return runCatching {
+            getOrCreateSession(
+                context = appContext,
+                mediaCodecSelector = mediaCodecSelector,
+                extensionRendererMode = extensionRendererMode,
+                codecProfileKey = codecProfileKey,
+                subtitlesEnabledByUser = false,
+                forceLowRamMode = false,
+                batterySaverEnabled = batterySaverEnabled,
+                isNetworkStream = false
+            )
+            true
+        }.getOrDefault(false)
+    }
 
     @Synchronized
     fun getOrCreateSession(
         context: Context,
-        mediaCodecSelector: MediaCodecSelector = MediaCodecSelector.DEFAULT,
+        mediaCodecSelector: MediaCodecSelector = NextRenderersFactory.createXvidAwareSelector(),
         extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
         codecProfileKey: String = "DEFAULT:$extensionRendererMode",
         subtitlesEnabledByUser: Boolean = false,
         forceLowRamMode: Boolean = false,
-        batterySaverEnabled: Boolean = false
+        batterySaverEnabled: Boolean = false,
+        isNetworkStream: Boolean = false
     ): PooledPlayerSession {
         val appContext = context.applicationContext ?: context
-        val isLowRam = forceLowRamMode || CyosFastPlayer.isLowRamDevice(appContext)
-        val shouldPool = !isLowRam
-
         val existingPlayer = pooledPlayer
-        if (shouldPool &&
-            existingPlayer != null &&
-            lastCodecKey == codecProfileKey
+        if (existingPlayer != null &&
+            lastCodecKey == codecProfileKey &&
+            lastNetworkMode == isNetworkStream
         ) {
             return PooledPlayerSession(
                 player = existingPlayer,
@@ -70,7 +106,8 @@ object CyosPlayerHolder {
         val loadControl = CyosFastPlayer.createLoadControl(
             context = appContext,
             forceLowRamMode = forceLowRamMode,
-            batterySaverEnabled = batterySaverEnabled
+            batterySaverEnabled = batterySaverEnabled,
+            isNetworkStream = isNetworkStream
         )
         val renderersFactory = CyosFastPlayer.createRenderersFactory(
             context = appContext,
@@ -83,19 +120,18 @@ object CyosPlayerHolder {
             context = appContext,
             loadControl = loadControl,
             renderersFactory = renderersFactory,
-            capNetworkStartupBitrate = false,
+            capNetworkStartupBitrate = isNetworkStream,
             subtitlesEnabledByUser = subtitlesEnabledByUser
         )
 
-        if (shouldPool) {
-            pooledPlayer = newPlayer
-            lastCodecKey = codecProfileKey
-        }
+        pooledPlayer = newPlayer
+        lastCodecKey = codecProfileKey
+        lastNetworkMode = isNetworkStream
 
         return PooledPlayerSession(
             player = newPlayer,
             downmixAudioProcessor = sharedDownmixAudioProcessor,
-            isPooled = shouldPool
+            isPooled = true
         )
     }
 
@@ -105,19 +141,26 @@ object CyosPlayerHolder {
         mediaItem: MediaItem,
         resumeMs: Long = 0L,
         codecProfileKey: String = "DEFAULT:${DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON}",
+        mediaCodecSelector: MediaCodecSelector = NextRenderersFactory.createXvidAwareSelector(),
+        extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
+        forceLowRamMode: Boolean = false,
         batterySaverEnabled: Boolean = false
     ): Boolean {
         val appContext = context.applicationContext ?: context
-        if (CyosFastPlayer.isLowRamDevice(appContext)) {
-            return false
-        }
+        val itemUri = mediaItem.localConfiguration?.uri
+        val isNetwork = CyosFastPlayer.isNetworkStreamUri(itemUri)
         return runCatching {
             val session = getOrCreateSession(
                 context = appContext,
+                mediaCodecSelector = mediaCodecSelector,
+                extensionRendererMode = extensionRendererMode,
                 codecProfileKey = codecProfileKey,
-                batterySaverEnabled = batterySaverEnabled
+                subtitlesEnabledByUser = false,
+                forceLowRamMode = forceLowRamMode,
+                batterySaverEnabled = batterySaverEnabled,
+                isNetworkStream = isNetwork
             )
-            if (!session.isPooled) return@runCatching false
+            StartupLatencyTracker.markPlayerAcquired()
 
             CyosFastPlayer.playOnTap(
                 player = session.player,
@@ -125,7 +168,7 @@ object CyosPlayerHolder {
                 resumeMs = resumeMs,
                 autoPlay = true
             )
-            lastPreparedUri = mediaItem.localConfiguration?.uri
+            lastPreparedUri = itemUri
             lastPreparedPositionMs = resumeMs
             true
         }.getOrDefault(false)
@@ -177,6 +220,7 @@ object CyosPlayerHolder {
         lastPreparedUri = null
         lastPreparedPositionMs = 0L
         lastCodecKey = ""
+        lastNetworkMode = false
         try {
             pooledPlayer?.release()
         } catch (_: Throwable) {

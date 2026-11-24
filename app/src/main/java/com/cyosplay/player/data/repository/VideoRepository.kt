@@ -1,15 +1,26 @@
 package com.cyosplay.player.data.repository
 
+import android.Manifest
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
+import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.os.StatFs
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.cyosplay.player.data.model.MoveDestinationOption
 import com.cyosplay.player.data.model.StorageDirectoryNode
 import com.cyosplay.player.data.model.StorageSubfolderItem
@@ -179,7 +190,8 @@ class VideoRepository(private val context: Context) {
                     val parentPath = (File(path).parent ?: "/storage/emulated/0/Movies").trim().trimEnd('/')
                     val folderName = cursor.getString(bucketNameCol)
                         ?: File(parentPath).name.ifBlank { "Movies" }
-                    val folderId = parentPath.lowercase().hashCode().toString()
+                    val mediaStoreBucketId = cursor.getString(bucketIdCol)?.trim()?.takeIf { it.isNotEmpty() }
+                    val folderId = mediaStoreBucketId ?: parentPath.lowercase().hashCode().toString()
                     val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
                     val isRemovable = CryptoSecurityManager.isRemovableSdCardPath(path)
                     val rawW = cursor.getInt(widthCol)
@@ -1127,7 +1139,52 @@ class VideoRepository(private val context: Context) {
         return destinations
     }
 
-    fun groupVideosIntoFolders(videos: List<VideoItem>): List<VideoFolder> {
+    fun hasVideoStoragePermission(): Boolean {
+        return hasVideoStoragePermission(appContext)
+    }
+
+    /**
+     * Registers a lightweight, debounced [ContentObserver] on
+     * [MediaStore.Video.Media.EXTERNAL_CONTENT_URI] so live folder/video additions
+     * trigger a single coalesced background refresh without thrashing 1 GB RAM devices.
+     */
+    fun registerDebouncedVideoObserver(
+        scope: CoroutineScope,
+        debounceMs: Long = 400L,
+        onMediaStoreChanged: () -> Unit
+    ): ContentObserver? {
+        if (!hasVideoStoragePermission()) return null
+        return runCatching {
+            var debounceJob: Job? = null
+            val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+                override fun onChange(selfChange: Boolean, uri: Uri?) {
+                    debounceJob?.cancel()
+                    debounceJob = scope.launch {
+                        delay(debounceMs)
+                        onMediaStoreChanged()
+                    }
+                }
+            }
+            appContext.contentResolver.registerContentObserver(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                true,
+                observer
+            )
+            observer
+        }.getOrNull()
+    }
+
+    fun unregisterVideoObserver(observer: ContentObserver?) {
+        if (observer == null) return
+        runCatching {
+            appContext.contentResolver.unregisterContentObserver(observer)
+        }
+    }
+
+    fun groupVideosIntoFolders(
+        videos: List<VideoItem>,
+        unseenNewFolderIds: Set<String> = emptySet()
+    ): List<VideoFolder> {
         val strictVideos = videos.filter { video ->
             isStrictVideoFile(video.displayName.ifBlank { video.path }, video.mimeType)
         }
@@ -1137,13 +1194,20 @@ class VideoRepository(private val context: Context) {
                 if (items.isEmpty()) return@mapNotNull null
                 val first = items.first()
                 val folderName = first.folderName.ifBlank { folderPath.substringAfterLast('/').ifBlank { "Movies" } }
+                val resolvedBucketId = items
+                    .asSequence()
+                    .map { it.folderId.trim() }
+                    .firstOrNull { it.isNotEmpty() }
+                    ?: folderPath.lowercase().hashCode().toString()
                 VideoFolder(
-                    id = folderPath.lowercase().hashCode().toString(),
+                    id = resolvedBucketId,
                     name = folderName,
                     path = folderPath,
                     videos = items,
                     isRemovableStorage = items.any { it.isRemovableStorage } ||
-                        CryptoSecurityManager.isRemovableSdCardPath(folderPath)
+                        CryptoSecurityManager.isRemovableSdCardPath(folderPath),
+                    bucketId = resolvedBucketId,
+                    isNew = unseenNewFolderIds.contains(resolvedBucketId)
                 )
             }
             .filter { it.videoCount > 0 }
@@ -1645,9 +1709,19 @@ class VideoRepository(private val context: Context) {
             "pbm", "pcx", "pgm", "pgmyuv", "pictor", "pixlet", "ppm", "prores", "prosumer",
             "psd", "psp", "ptx", "pva", "qcif", "qt", "qtch", "r3d", "rec", "rgb", "rm", "rmvb",
             "roq", "rrc", "smk", "ssif", "str", "svi", "swf", "thp", "tod", "tp", "trp", "ts",
-            "tts", "v210", "vc1", "vdr", "viv", "vob", "vp8", "vp9", "vro", "vvc", "webm", "wmv",
-            "wtv", "x26", "x264", "x265", "xesc", "xl", "xvid", "y4m", "yuv", "yuv10"
+            "tts", "v210", "vc1", "vdr", "viv", "vob", "vp8", "vp9", "vp09", "vro", "vvc", "webm", "wmv",
+            "wtv", "x26", "x264", "x265", "xesc", "xl", "xvid", "y4m", "yuv", "yuv10",
+            "av01", "dvh1", "dvhe", "hvc1", "hev1", "fmp4", "ismc", "k3g", "skm", "amc", "lrv", "insv", "crm", "ari"
         )
+
+        fun hasVideoStoragePermission(context: Context): Boolean {
+            val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                Manifest.permission.READ_MEDIA_VIDEO
+            } else {
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            }
+            return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        }
 
         /**
          * Extensions for image and non-video media that must strictly NEVER be treated as videos.
