@@ -26,19 +26,17 @@ object AndroidVersionCompatHelper {
      * from Android 7.0 (API 24) through Android 18 (API 38+):
      * - Android 7.0–9.0 (API 24–28): READ_EXTERNAL_STORAGE + WRITE_EXTERNAL_STORAGE
      * - Android 10–12L (API 29–32): READ_EXTERNAL_STORAGE (Scoped Storage)
-     * - Android 13 (API 33): READ_MEDIA_VIDEO + READ_MEDIA_AUDIO
-     * - Android 14–18+ (API 34–38+): READ_MEDIA_VIDEO + READ_MEDIA_AUDIO + READ_MEDIA_VISUAL_USER_SELECTED
+     * - Android 13 (API 33): READ_MEDIA_VIDEO
+     * - Android 14–18+ (API 34–38+): READ_MEDIA_VIDEO + READ_MEDIA_VISUAL_USER_SELECTED
      */
     fun resolveRuntimeMediaPermissions(sdkInt: Int = Build.VERSION.SDK_INT): Array<String> {
         return when {
             sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> arrayOf(
                 Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.READ_MEDIA_AUDIO,
                 Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
             )
             sdkInt >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
-                Manifest.permission.READ_MEDIA_VIDEO,
-                Manifest.permission.READ_MEDIA_AUDIO
+                Manifest.permission.READ_MEDIA_VIDEO
             )
             sdkInt <= Build.VERSION_CODES.P -> arrayOf(
                 Manifest.permission.READ_EXTERNAL_STORAGE,

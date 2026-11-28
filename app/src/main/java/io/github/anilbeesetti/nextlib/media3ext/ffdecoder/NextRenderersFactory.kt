@@ -13,9 +13,11 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 
 /**
- * Hardware-first Media3 RenderersFactory (`EXTENSION_RENDERER_MODE_ON`) with async MediaCodec
- * queueing on API 23+ and targeted software-decoder priority strictly for legacy MPEG-4 Part 2 /
- * Xvid / DivX packed B-frame streams (`video/mp4v-es`), plus automatic decoder fallback.
+ * Hardware-first Media3 RenderersFactory (`EXTENSION_RENDERER_MODE_ON`) using Android OEM & Media3
+ * codecs (without bundled native FFmpeg `.so` binaries), gating asynchronous MediaCodec queueing
+ * strictly to Android 12+ (API 31+) to avoid frame freezes on older Android 7–11 SoCs, and
+ * prioritizing software decoders strictly for legacy MPEG-4 Part 2 / Xvid / DivX packed B-frame
+ * streams (`video/mp4v-es`) with automatic decoder fallback.
  */
 @OptIn(UnstableApi::class)
 open class NextRenderersFactory(
@@ -27,7 +29,7 @@ open class NextRenderersFactory(
         setEnableDecoderFallback(true)
         setExtensionRendererMode(EXTENSION_RENDERER_MODE_ON)
         setMediaCodecSelector(createXvidAwareSelector(MediaCodecSelector.DEFAULT))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             forceEnableMediaCodecAsynchronousQueueing()
         }
     }

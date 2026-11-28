@@ -147,16 +147,34 @@ private class SafeSubtitleTrackOutput(
         sampleDataPart: Int
     ): Int {
         if (textTrackFaulted) {
-            val skipBuf = ByteArray(minOf(length.coerceAtLeast(1), 4096))
-            val read = runCatching { input.read(skipBuf, 0, minOf(length, skipBuf.size)) }.getOrDefault(C.RESULT_END_OF_INPUT)
-            return if (read == C.RESULT_END_OF_INPUT && allowEndOfInput) C.RESULT_END_OF_INPUT else read.coerceAtLeast(0)
+            return drainReaderBytes(input, length, allowEndOfInput)
         }
         return runCatching {
             delegate.sampleData(input, length, allowEndOfInput, sampleDataPart)
         }.getOrElse {
             textTrackFaulted = true
-            if (allowEndOfInput) C.RESULT_END_OF_INPUT else 0
+            drainReaderBytes(input, length, allowEndOfInput)
         }
+    }
+
+    private fun drainReaderBytes(
+        input: androidx.media3.common.DataReader,
+        length: Int,
+        allowEndOfInput: Boolean
+    ): Int {
+        if (length <= 0) return 0
+        val skipBuf = ByteArray(minOf(length, 4096))
+        var totalDrained = 0
+        while (totalDrained < length) {
+            val toRead = minOf(skipBuf.size, length - totalDrained)
+            val read = runCatching { input.read(skipBuf, 0, toRead) }.getOrDefault(C.RESULT_END_OF_INPUT)
+            if (read == C.RESULT_END_OF_INPUT) {
+                return if (totalDrained > 0) totalDrained else if (allowEndOfInput) C.RESULT_END_OF_INPUT else 0
+            }
+            if (read <= 0) break
+            totalDrained += read
+        }
+        return totalDrained
     }
 
     override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
@@ -164,10 +182,15 @@ private class SafeSubtitleTrackOutput(
             data.skipBytes(minOf(length, data.bytesLeft()).coerceAtLeast(0))
             return
         }
+        val startPosition = data.position
+        val expectedEndPosition = minOf(data.limit(), startPosition + length.coerceAtLeast(0))
         runCatching {
             delegate.sampleData(data, length, sampleDataPart)
         }.onFailure {
             textTrackFaulted = true
+            if (data.position < expectedEndPosition) {
+                data.position = expectedEndPosition
+            }
         }
     }
 
@@ -197,13 +220,59 @@ class XvidFixingTrackOutput(
     private var sampleBuffer: ByteArray? = null
     private var bufferedBytes = 0
 
-    private fun ensureSampleBuffer(): ByteArray {
+    private fun ensureSampleBuffer(additionalBytes: Int): ByteArray? {
+        val needed = bufferedBytes + additionalBytes.coerceAtLeast(0)
+        if (needed > MAX_FIRST_FRAME_BUFFER_BYTES) {
+            return null
+        }
         var buf = sampleBuffer
         if (buf == null) {
-            buf = ByteArray(256 * 1024)
+            val initialSize = maxOf(INITIAL_FIRST_FRAME_BUFFER_BYTES, needed)
+            buf = ByteArray(initialSize)
             sampleBuffer = buf
+            return buf
         }
-        return buf
+        if (needed <= buf.size) {
+            return buf
+        }
+        var newSize = buf.size
+        while (newSize < needed && newSize < MAX_FIRST_FRAME_BUFFER_BYTES) {
+            newSize = minOf(newSize * 2, MAX_FIRST_FRAME_BUFFER_BYTES)
+        }
+        if (newSize < needed) return null
+        val grown = buf.copyOf(newSize)
+        sampleBuffer = grown
+        return grown
+    }
+
+    private fun dispatchPendingFormatAndFlushBufferedBytes() {
+        if (formatDispatched) return
+        val baseFormat = pendingUnknownVideoFormat
+        val buf = sampleBuffer
+        if (baseFormat != null) {
+            val csd0 = if (buf != null && bufferedBytes > 0) extractMpeg4Csd0(buf, bufferedBytes) else null
+            val normalizedPar = resolveNormalizedPixelAspectRatio(baseFormat)
+            val fixedFormat = baseFormat.buildUpon()
+                .setSampleMimeType(MimeTypes.VIDEO_MP4V)
+                .setCodecs("mp4v.20.5")
+                .setPixelWidthHeightRatio(normalizedPar)
+                .apply {
+                    if (csd0 != null) {
+                        setInitializationData(listOf(csd0))
+                    } else if (baseFormat.initializationData.isNotEmpty()) {
+                        setInitializationData(baseFormat.initializationData)
+                    }
+                }
+                .build()
+            delegate.format(fixedFormat)
+        }
+        formatDispatched = true
+        if (buf != null && bufferedBytes > 0) {
+            delegate.sampleData(ParsableByteArray(buf, bufferedBytes), bufferedBytes)
+        }
+        bufferedBytes = 0
+        sampleBuffer = null
+        pendingUnknownVideoFormat = null
     }
 
     override fun format(format: Format) {
@@ -233,7 +302,13 @@ class XvidFixingTrackOutput(
         if (formatDispatched) {
             return delegate.sampleData(input, length, allowEndOfInput, sampleDataPart)
         }
-        val buf = ensureSampleBuffer()
+        if (length <= 0) return 0
+        val buf = ensureSampleBuffer(length)
+        if (buf == null) {
+            // First keyframe exceeded max pre-buffer cap: dispatch format & flush what we have, then stream directly
+            dispatchPendingFormatAndFlushBufferedBytes()
+            return delegate.sampleData(input, length, allowEndOfInput, sampleDataPart)
+        }
         val bytesToRead = minOf(length, buf.size - bufferedBytes)
         val bytesRead = input.read(buf, bufferedBytes, bytesToRead)
         if (bytesRead == C.RESULT_END_OF_INPUT) {
@@ -249,12 +324,19 @@ class XvidFixingTrackOutput(
             delegate.sampleData(data, length, sampleDataPart)
             return
         }
-        val buf = ensureSampleBuffer()
+        if (length <= 0) return
+        val buf = ensureSampleBuffer(length)
+        if (buf == null) {
+            dispatchPendingFormatAndFlushBufferedBytes()
+            delegate.sampleData(data, length, sampleDataPart)
+            return
+        }
         val bytesToCopy = minOf(length, buf.size - bufferedBytes)
         data.readBytes(buf, bufferedBytes, bytesToCopy)
         bufferedBytes += bytesToCopy
         if (length > bytesToCopy) {
-            data.skipBytes(length - bytesToCopy)
+            dispatchPendingFormatAndFlushBufferedBytes()
+            delegate.sampleData(data, length - bytesToCopy, sampleDataPart)
         }
     }
 
@@ -267,7 +349,7 @@ class XvidFixingTrackOutput(
     ) {
         if (!formatDispatched && pendingUnknownVideoFormat != null) {
             val baseFormat = pendingUnknownVideoFormat!!
-            val buf = ensureSampleBuffer()
+            val buf = sampleBuffer ?: ByteArray(0)
             // Extract MPEG-4 Visual configuration (00 00 01 B0 ... up to first VOP 00 00 01 B6)
             val validSize = minOf(size, bufferedBytes)
             val csd0 = extractMpeg4Csd0(buf, validSize)
@@ -301,6 +383,9 @@ class XvidFixingTrackOutput(
     }
 
     companion object {
+        private const val INITIAL_FIRST_FRAME_BUFFER_BYTES = 256 * 1024
+        private const val MAX_FIRST_FRAME_BUFFER_BYTES = 4 * 1024 * 1024
+
         /**
          * Finds the MPEG-4 Visual Object Sequence / VOL header (00 00 01 B0 / 00 00 01 20)
          * up to the start of the first Video Object Plane (00 00 01 B6) so MediaCodec receives csd-0.
@@ -323,19 +408,19 @@ class XvidFixingTrackOutput(
         }
 
         /**
-         * Fixes non-square pixel aspect ratio (e.g. 704x396 with SAR 396:563 -> 4:3 display
-         * or preserves container DAR) so anamorphic SD/HD Matroska streams render without distortion.
+         * Fixes non-square pixel aspect ratio only when the container explicitly signals anamorphic
+         * DAR/SAR (e.g., 704x396 with Matroska SAR 396:563 -> 4:3 display 0.75f). Preserves standard
+         * square-pixel 16:9 704x396 streams (PAR == 1.0f) untouched.
          */
         fun resolveNormalizedPixelAspectRatio(format: Format): Float {
             val currentPar = format.pixelWidthHeightRatio
             if (format.width == 704 && format.height == 396) {
-                // 704x396 is 16:9 storage; when Matroska DisplayWidth=495x396 (SAR 396:563, ~0.70337f),
-                // map to 4:3 display (PAR = (4/3) / (704/396) = 0.75f), or when unspecified (1.0f) map to 396/563f.
+                // Only normalize when container explicitly signals anamorphic SAR 396:563 (~0.70337f)
                 if (abs(currentPar - (396f / 563f)) < 0.02f) {
                     return 0.75f
                 }
-                if (currentPar <= 0f || abs(currentPar - 1.0f) < 0.01f) {
-                    return 396f / 563f
+                if (currentPar <= 0f || !currentPar.isFinite()) {
+                    return 1.0f
                 }
             }
             return if (currentPar > 0.05f && currentPar.isFinite()) currentPar else 1.0f
@@ -415,12 +500,12 @@ fun buildCyosExoPlayer(
         preferSoftwareForAllCodecs = isSwEngine
     )
 
-    // 2. Use NextRenderersFactory with hardware-first EXTENSION_RENDERER_MODE_ON + API 23+ async queueing
+    // 2. Use NextRenderersFactory with hardware-first EXTENSION_RENDERER_MODE_ON + API 31+ async queueing
     val renderersFactory = NextRenderersFactory(appCtx, customAudioProcessors)
         .setMediaCodecSelector(xvidAwareSelector)
         .setEnableDecoderFallback(true)
         .setExtensionRendererMode(extensionRendererMode)
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
         renderersFactory.forceEnableMediaCodecAsynchronousQueueing()
     }
 

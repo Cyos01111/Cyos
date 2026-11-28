@@ -81,6 +81,10 @@ object CryptoSecurityManager {
 
     // Streaming file encryption constants (256 KB chunks for low-RAM footprint on 4K/8K REMUX files)
     private val STREAM_MAGIC_HEADER = "CYOSV3\u0000\u0001".toByteArray(StandardCharsets.US_ASCII)
+    private val STREAM_MAGIC_HEADER_V4 = "CYOSV4\u0000\u0001".toByteArray(StandardCharsets.US_ASCII)
+    private val STREAM_V4_DEK_WRAP_AAD = "CYOSV4_DEK_WRAP".toByteArray(StandardCharsets.US_ASCII)
+    const val STREAM_V4_WRAPPED_DEK_BYTES = 32 + GCM_TAG_BYTES // 48 bytes (256-bit DEK + 128-bit GCM tag)
+    const val STREAM_V4_HEADER_SIZE_BYTES = 8L + GCM_IV_LENGTH + STREAM_V4_WRAPPED_DEK_BYTES + GCM_IV_LENGTH + 8L // 88 bytes
     const val STREAM_CHUNK_SIZE = 256 * 1024
 
     const val MAJOR_CAPABILITY_UNIQUE_ID = "cyos play"
@@ -88,8 +92,30 @@ object CryptoSecurityManager {
     private const val KEY_DATA_CODES_PASSCODE_HASH = "zk_data_codes_passcode_hash_v4"
     const val MIN_DATA_CODES_PASSCODE_LENGTH: Int = 6
 
+    class KeystoreUnwrapException(
+        message: String,
+        cause: Throwable? = null
+    ) : IllegalStateException(message, cause)
+
     fun interface KeyRotationListener {
         fun onMasterKeyRotated(oldKey: SecretKey, newKey: SecretKey)
+    }
+
+    /**
+     * Two-phase key rotation participant: prepares/stages re-encrypted files with [newKey] BEFORE
+     * the new DEK is persisted, and only commits renames after the new DEK is durable.
+     */
+    interface TwoPhaseKeyRotationListener : KeyRotationListener {
+        fun prepareMasterKeyRotation(oldKey: SecretKey, newKey: SecretKey): Boolean
+        fun commitMasterKeyRotation(newKey: SecretKey)
+        fun rollbackMasterKeyRotation(oldKey: SecretKey)
+        override fun onMasterKeyRotated(oldKey: SecretKey, newKey: SecretKey) {
+            if (prepareMasterKeyRotation(oldKey, newKey)) {
+                commitMasterKeyRotation(newKey)
+            } else {
+                rollbackMasterKeyRotation(oldKey)
+            }
+        }
     }
 
     private val rotationListeners = CopyOnWriteArrayList<KeyRotationListener>()
@@ -97,6 +123,15 @@ object CryptoSecurityManager {
 
     @Volatile
     private var cachedDataEncryptionKey: SecretKey? = null
+
+    @Volatile
+    var lastKeystoreErrorMessage: String? = null
+        private set
+
+    internal fun clearCachedKeyForTesting() {
+        cachedDataEncryptionKey = null
+        lastKeystoreErrorMessage = null
+    }
 
     fun registerRotationListener(listener: KeyRotationListener) {
         if (!rotationListeners.contains(listener)) {
@@ -296,24 +331,39 @@ object CryptoSecurityManager {
         val prefs = getKeystorePrefs(context)
         getOrCreateDeviceSalt(prefs)
 
-        // 1. Check AndroidKeyStore v3 wrapped DEK first
+        // 1. If an existing AndroidKeyStore v3 wrapped DEK is persisted, NEVER overwrite it on transient failure.
         val wrappedV3Base64 = prefs.getString(KEY_WRAPPED_KEYSTORE_DEK_V3, null)
         if (!wrappedV3Base64.isNullOrBlank()) {
-            try {
-                val wrappedBytes = Base64.decode(wrappedV3Base64, Base64.NO_WRAP)
-                val rawDek = unwrapDekWithKeystoreMaster(context, wrappedBytes)
-                if (rawDek != null && rawDek.size == 32) {
-                    val key = SecretKeySpec(rawDek, "AES")
-                    Arrays.fill(rawDek, 0.toByte())
-                    cachedDataEncryptionKey = key
-                    return key
+            var lastFailure: Throwable? = null
+            val retryDelaysMs = longArrayOf(0L, 40L, 120L)
+            for (delayMs in retryDelaysMs) {
+                if (delayMs > 0L) {
+                    try {
+                        Thread.sleep(delayMs)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
                 }
-            } catch (_: Exception) {
-                // Fall through to fresh DEK generation
+                try {
+                    val wrappedBytes = Base64.decode(wrappedV3Base64, Base64.NO_WRAP)
+                    val rawDek = unwrapDekWithKeystoreMaster(context, wrappedBytes)
+                    if (rawDek != null && rawDek.size == 32) {
+                        val key = SecretKeySpec(rawDek, "AES")
+                        Arrays.fill(rawDek, 0.toByte())
+                        cachedDataEncryptionKey = key
+                        lastKeystoreErrorMessage = null
+                        return key
+                    }
+                } catch (t: Throwable) {
+                    lastFailure = t
+                }
             }
+            val msg = "AndroidKeyStore temporarily unavailable; existing wrapped DEK preserved to protect Vault & settings."
+            lastKeystoreErrorMessage = msg
+            throw KeystoreUnwrapException(msg, lastFailure)
         }
 
-        // 2. Generate a fresh 256-bit DEK protected by AndroidKeyStore (or per-device CSPRNG KEK)
+        // 2. First-time setup only: generate a fresh 256-bit DEK protected by AndroidKeyStore (or per-device CSPRNG KEK)
         val freshDekBytes = ByteArray(32)
         secureRandom.nextBytes(freshDekBytes)
         val freshKey = SecretKeySpec(freshDekBytes, "AES")
@@ -326,17 +376,20 @@ object CryptoSecurityManager {
             .putLong(KEY_LAST_ROTATION_TS, System.currentTimeMillis())
             .commit()
         cachedDataEncryptionKey = freshKey
+        lastKeystoreErrorMessage = null
         return freshKey
     }
 
     /**
-     * Rotates the Data Encryption Key (DEK) using 256-bit CSPRNG entropy wrapped by AndroidKeyStore,
-     * and notifies all registered repositories to atomically re-encrypt their stores and vault files.
+     * Rotates the Data Encryption Key (DEK) using 256-bit CSPRNG entropy wrapped by AndroidKeyStore
+     * via a two-phase commit: two-phase listeners (e.g., Vault files) stage & verify all re-encrypted
+     * files BEFORE the new DEK is persisted, preventing partial-rotation corruption.
      */
     @Synchronized
     fun rotateDynamicEncryptionKey(context: Context, reason: String = "security_key_rotation"): Int {
         val prefs = getKeystorePrefs(context)
         val oldKey = getOrCreateDataEncryptionKey(context)
+        val currentRotationCount = prefs.getInt(KEY_AUTO_ROTATION_COUNT, 0)
 
         val newDekBytes = ByteArray(32)
         secureRandom.nextBytes(newDekBytes)
@@ -344,7 +397,27 @@ object CryptoSecurityManager {
         val wrappedV3 = wrapDekWithKeystoreMaster(context, newDekBytes)
         Arrays.fill(newDekBytes, 0.toByte())
 
-        val newRotationCount = prefs.getInt(KEY_AUTO_ROTATION_COUNT, 0) + 1
+        // Phase 1: Stage & verify all two-phase listeners BEFORE committing the new DEK
+        val twoPhaseListeners = rotationListeners.filterIsInstance<TwoPhaseKeyRotationListener>()
+        val preparedListeners = mutableListOf<TwoPhaseKeyRotationListener>()
+        for (listener in twoPhaseListeners) {
+            val prepared = try {
+                listener.prepareMasterKeyRotation(oldKey, newKey)
+            } catch (_: Exception) {
+                false
+            }
+            if (!prepared) {
+                preparedListeners.forEach { preparedListener ->
+                    runCatching { preparedListener.rollbackMasterKeyRotation(oldKey) }
+                }
+                runCatching { listener.rollbackMasterKeyRotation(oldKey) }
+                return currentRotationCount
+            }
+            preparedListeners.add(listener)
+        }
+
+        // Phase 2: Persist the new wrapped DEK durably, then commit all prepared listeners
+        val newRotationCount = currentRotationCount + 1
         prefs.edit()
             .putString(KEY_WRAPPED_KEYSTORE_DEK_V3, Base64.encodeToString(wrappedV3, Base64.NO_WRAP))
             .putBoolean(KEY_KEYSTORE_MIGRATED_V3, true)
@@ -356,11 +429,12 @@ object CryptoSecurityManager {
 
         cachedDataEncryptionKey = newKey
 
+        for (listener in preparedListeners) {
+            runCatching { listener.commitMasterKeyRotation(newKey) }
+        }
         for (listener in rotationListeners) {
-            try {
-                listener.onMasterKeyRotated(oldKey, newKey)
-            } catch (_: Exception) {
-                // Continue rotating remaining stores safely
+            if (listener !is TwoPhaseKeyRotationListener) {
+                runCatching { listener.onMasterKeyRotated(oldKey, newKey) }
             }
         }
         return newRotationCount
@@ -661,10 +735,38 @@ object CryptoSecurityManager {
             .array()
     }
 
+    private fun wrapFileDekWithKek(fileDekBytes: ByteArray, kek: SecretKey): Pair<ByteArray, ByteArray> {
+        val wrapIv = ByteArray(GCM_IV_LENGTH).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, kek, GCMParameterSpec(GCM_TAG_BITS, wrapIv))
+        cipher.updateAAD(STREAM_V4_DEK_WRAP_AAD)
+        val wrappedDek = cipher.doFinal(fileDekBytes)
+        return wrapIv to wrappedDek
+    }
+
+    private fun unwrapFileDekBytesWithKek(wrapIv: ByteArray, wrappedDek: ByteArray, kek: SecretKey): ByteArray? {
+        if (wrapIv.size != GCM_IV_LENGTH || wrappedDek.size != STREAM_V4_WRAPPED_DEK_BYTES) return null
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(GCM_TAG_BITS, wrapIv))
+            cipher.updateAAD(STREAM_V4_DEK_WRAP_AAD)
+            val rawDek = cipher.doFinal(wrappedDek)
+            if (rawDek.size == 32) {
+                rawDek
+            } else {
+                Arrays.fill(rawDek, 0.toByte())
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /**
-     * Streams encryption of a file onto disk in bounded 256 KB chunks using AES-256-GCM (CYOS_STREAM_V3).
-     * Never loads the whole video into memory, writes to a staging .tmp file first, and verifies integrity
-     * before atomically replacing targetEncryptedFile.
+     * Streams encryption of a file onto disk in bounded 256 KB chunks using AES-256-GCM V4 Envelope
+     * Encryption (random per-file 256-bit DEK wrapped by the master KEK in an 88-byte header).
+     * Enables O(1) instant key rotation by re-wrapping only the 60-byte DEK envelope without
+     * ever touching or re-encrypting multi-gigabyte video payloads.
      */
     fun encryptFileToDisk(context: Context, sourceFile: File, targetEncryptedFile: File): Boolean {
         val key = getOrCreateDataEncryptionKey(context)
@@ -672,6 +774,101 @@ object CryptoSecurityManager {
     }
 
     fun encryptFileToDiskWithKey(sourceFile: File, targetEncryptedFile: File, key: SecretKey): Boolean {
+        return encryptFileToStreamV4WithKek(sourceFile, targetEncryptedFile, key)
+    }
+
+    fun encryptFileToStreamV4WithKek(sourceFile: File, targetEncryptedFile: File, kek: SecretKey): Boolean {
+        if (!sourceFile.exists() || !sourceFile.isFile || sourceFile.length() <= 0L) {
+            return false
+        }
+        val parentDir = targetEncryptedFile.parentFile ?: return false
+        parentDir.mkdirs()
+        val stagingFile = File(parentDir, "${targetEncryptedFile.name}.tmp_${System.nanoTime()}")
+
+        val rawFileDek = ByteArray(32).also { secureRandom.nextBytes(it) }
+        val fileDek = SecretKeySpec(rawFileDek, "AES")
+        val (dekWrapIv, wrappedFileDek) = wrapFileDekWithKek(rawFileDek, kek)
+        Arrays.fill(rawFileDek, 0.toByte())
+
+        val baseIv = ByteArray(GCM_IV_LENGTH).also { secureRandom.nextBytes(it) }
+        val plainBuffer = ByteArray(STREAM_CHUNK_SIZE)
+        var success = false
+
+        try {
+            val totalLength = sourceFile.length()
+            BufferedInputStream(FileInputStream(sourceFile), STREAM_CHUNK_SIZE).use { input ->
+                FileOutputStream(stagingFile).use { fos ->
+                    DataOutputStream(BufferedOutputStream(fos, STREAM_CHUNK_SIZE)).use { out ->
+                        out.write(STREAM_MAGIC_HEADER_V4)
+                        out.write(dekWrapIv)
+                        out.write(wrappedFileDek)
+                        out.write(baseIv)
+                        out.writeLong(totalLength)
+
+                        var bytesRemaining = totalLength
+                        var chunkIndex = 0L
+
+                        while (bytesRemaining > 0L) {
+                            val toRead = minOf(plainBuffer.size.toLong(), bytesRemaining).toInt()
+                            var totalReadInChunk = 0
+                            while (totalReadInChunk < toRead) {
+                                val read = input.read(plainBuffer, totalReadInChunk, toRead - totalReadInChunk)
+                                if (read <= 0) break
+                                totalReadInChunk += read
+                            }
+                            if (totalReadInChunk <= 0) {
+                                throw EOFException("Unexpected EOF while encrypting source file")
+                            }
+                            bytesRemaining -= totalReadInChunk.toLong()
+                            val isFinal = bytesRemaining == 0L
+
+                            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                            val chunkIv = deriveChunkIv(baseIv, chunkIndex)
+                            cipher.init(Cipher.ENCRYPT_MODE, fileDek, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
+                            cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
+                            val encryptedChunk = cipher.doFinal(plainBuffer, 0, totalReadInChunk)
+
+                            out.writeInt(encryptedChunk.size)
+                            out.write(encryptedChunk)
+                            chunkIndex++
+                        }
+                        out.flush()
+                        try {
+                            fos.fd.sync()
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+
+            Arrays.fill(plainBuffer, 0.toByte())
+
+            if (!verifyEncryptedFileIntegrityWithKey(stagingFile, kek)) {
+                stagingFile.delete()
+                return false
+            }
+
+            if (targetEncryptedFile.exists()) {
+                targetEncryptedFile.delete()
+            }
+            success = if (stagingFile.renameTo(targetEncryptedFile)) {
+                true
+            } else {
+                stagingFile.copyTo(targetEncryptedFile, overwrite = true)
+                stagingFile.delete()
+                targetEncryptedFile.exists() && targetEncryptedFile.length() > STREAM_V4_HEADER_SIZE_BYTES
+            }
+            return success
+        } catch (_: Exception) {
+            Arrays.fill(plainBuffer, 0.toByte())
+            stagingFile.delete()
+            return false
+        }
+    }
+
+    /**
+     * Legacy V3 chunked encryption kept for backwards-compatibility migration tests.
+     */
+    fun encryptFileToDiskV3WithKey(sourceFile: File, targetEncryptedFile: File, key: SecretKey): Boolean {
         if (!sourceFile.exists() || !sourceFile.isFile || sourceFile.length() <= 0L) {
             return false
         }
@@ -720,16 +917,15 @@ object CryptoSecurityManager {
                             chunkIndex++
                         }
                         out.flush()
+                        try {
+                            fos.fd.sync()
+                        } catch (_: Exception) {}
                     }
-                    try {
-                        fos.fd.sync()
-                    } catch (_: Exception) {}
                 }
             }
 
             Arrays.fill(plainBuffer, 0.toByte())
 
-            // Verify the newly encrypted staging file before committing
             if (!verifyEncryptedFileIntegrityWithKey(stagingFile, key)) {
                 stagingFile.delete()
                 return false
@@ -755,7 +951,7 @@ object CryptoSecurityManager {
 
     /**
      * Verifies the cryptographic integrity and completeness of an encrypted vault/recycle-bin file
-     * without writing plaintext to disk.
+     * (V4 envelope, V3 streaming, or legacy V2) without writing plaintext to disk.
      */
     fun verifyEncryptedFileIntegrity(context: Context, encryptedFile: File): Boolean {
         val key = getOrCreateDataEncryptionKey(context)
@@ -767,62 +963,116 @@ object CryptoSecurityManager {
             return false
         }
         return try {
-            if (isStreamV3File(encryptedFile)) {
-                DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
-                    val magic = ByteArray(STREAM_MAGIC_HEADER.size)
-                    dis.readFully(magic)
-                    if (!magic.contentEquals(STREAM_MAGIC_HEADER)) return false
+            when {
+                isStreamV4File(encryptedFile) -> {
+                    DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
+                        val magic = ByteArray(STREAM_MAGIC_HEADER_V4.size)
+                        dis.readFully(magic)
+                        if (!magic.contentEquals(STREAM_MAGIC_HEADER_V4)) return false
+                        val dekWrapIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(dekWrapIv)
+                        val wrappedDek = ByteArray(STREAM_V4_WRAPPED_DEK_BYTES)
+                        dis.readFully(wrappedDek)
+                        val rawDek = unwrapFileDekBytesWithKek(dekWrapIv, wrappedDek, key) ?: return false
+                        val fileDek = SecretKeySpec(rawDek, "AES")
+                        Arrays.fill(rawDek, 0.toByte())
 
-                    val baseIv = ByteArray(GCM_IV_LENGTH)
-                    dis.readFully(baseIv)
-                    val expectedPlainLength = dis.readLong()
-                    if (expectedPlainLength <= 0L) return false
-
-                    var verifiedPlainBytes = 0L
-                    var chunkIndex = 0L
-                    var sawFinalChunk = false
-
-                    while (verifiedPlainBytes < expectedPlainLength) {
-                        val encryptedChunkSize = try {
-                            dis.readInt()
-                        } catch (_: EOFException) {
-                            return false
-                        }
-                        if (encryptedChunkSize <= GCM_TAG_BYTES || encryptedChunkSize > STREAM_CHUNK_SIZE + GCM_TAG_BYTES + 1024) {
-                            return false
-                        }
-                        val encryptedChunk = ByteArray(encryptedChunkSize)
-                        dis.readFully(encryptedChunk)
-                        val chunkPlainSize = (encryptedChunkSize - GCM_TAG_BYTES).toLong()
-                        val isFinal = (verifiedPlainBytes + chunkPlainSize) == expectedPlainLength
-
-                        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                        val chunkIv = deriveChunkIv(baseIv, chunkIndex)
-                        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
-                        cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
-                        val plainChunk = cipher.doFinal(encryptedChunk)
-                        Arrays.fill(plainChunk, 0.toByte())
-
-                        verifiedPlainBytes += plainChunk.size.toLong()
-                        if (isFinal) sawFinalChunk = true
-                        chunkIndex++
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val expectedPlainLength = dis.readLong()
+                        if (expectedPlainLength <= 0L) return false
+                        verifyStreamChunks(dis, fileDek, baseIv, expectedPlainLength)
                     }
-                    sawFinalChunk && verifiedPlainBytes == expectedPlainLength
                 }
-            } else {
-                // Legacy v2 single-block format verification
-                val encryptedBytes = encryptedFile.readBytes()
-                val plainBytes = decryptBytesWithKey(encryptedBytes, key) ?: return false
-                val valid = plainBytes.isNotEmpty()
-                Arrays.fill(plainBytes, 0.toByte())
-                valid
+                isStreamV3File(encryptedFile) -> {
+                    DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
+                        val magic = ByteArray(STREAM_MAGIC_HEADER.size)
+                        dis.readFully(magic)
+                        if (!magic.contentEquals(STREAM_MAGIC_HEADER)) return false
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val expectedPlainLength = dis.readLong()
+                        if (expectedPlainLength <= 0L) return false
+                        verifyStreamChunks(dis, key, baseIv, expectedPlainLength)
+                    }
+                }
+                else -> {
+                    // Legacy v2 single-block format verification
+                    val encryptedBytes = encryptedFile.readBytes()
+                    val plainBytes = decryptBytesWithKey(encryptedBytes, key) ?: return false
+                    val valid = plainBytes.isNotEmpty()
+                    Arrays.fill(plainBytes, 0.toByte())
+                    valid
+                }
             }
         } catch (_: Exception) {
             false
         }
     }
 
-    private fun isStreamV3File(file: File): Boolean {
+    private fun verifyStreamChunks(
+        dis: DataInputStream,
+        chunkKey: SecretKey,
+        baseIv: ByteArray,
+        expectedPlainLength: Long
+    ): Boolean {
+        var verifiedPlainBytes = 0L
+        var chunkIndex = 0L
+        var sawFinalChunk = false
+
+        while (verifiedPlainBytes < expectedPlainLength) {
+            val encryptedChunkSize = try {
+                dis.readInt()
+            } catch (_: EOFException) {
+                return false
+            }
+            if (encryptedChunkSize <= GCM_TAG_BYTES || encryptedChunkSize > STREAM_CHUNK_SIZE + GCM_TAG_BYTES + 1024) {
+                return false
+            }
+            val encryptedChunk = ByteArray(encryptedChunkSize)
+            dis.readFully(encryptedChunk)
+            val chunkPlainSize = (encryptedChunkSize - GCM_TAG_BYTES).toLong()
+            val isFinal = (verifiedPlainBytes + chunkPlainSize) == expectedPlainLength
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val chunkIv = deriveChunkIv(baseIv, chunkIndex)
+            cipher.init(Cipher.DECRYPT_MODE, chunkKey, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
+            cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
+            val plainChunk = cipher.doFinal(encryptedChunk)
+            Arrays.fill(plainChunk, 0.toByte())
+
+            verifiedPlainBytes += plainChunk.size.toLong()
+            if (isFinal) sawFinalChunk = true
+            chunkIndex++
+        }
+        return sawFinalChunk && verifiedPlainBytes == expectedPlainLength
+    }
+
+    data class StreamV3Header(
+        val baseIv: ByteArray,
+        val totalPlainLength: Long,
+        val chunkPlainSize: Int = STREAM_CHUNK_SIZE,
+        val headerSizeBytes: Long = (STREAM_MAGIC_HEADER.size + GCM_IV_LENGTH + 8).toLong(),
+        val fullChunkRecordBytes: Long = (4 + STREAM_CHUNK_SIZE + GCM_TAG_BYTES).toLong(),
+        val version: Int = 3,
+        val dekWrapIv: ByteArray? = null,
+        val wrappedFileDek: ByteArray? = null
+    )
+
+    fun isStreamV4File(file: File): Boolean {
+        if (!file.exists() || file.length() < STREAM_V4_HEADER_SIZE_BYTES) return false
+        return try {
+            FileInputStream(file).use { fis ->
+                val header = ByteArray(STREAM_MAGIC_HEADER_V4.size)
+                val read = fis.read(header)
+                read == STREAM_MAGIC_HEADER_V4.size && header.contentEquals(STREAM_MAGIC_HEADER_V4)
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun isStreamV3File(file: File): Boolean {
         if (!file.exists() || file.length() < STREAM_MAGIC_HEADER.size + GCM_IV_LENGTH + 8) return false
         return try {
             FileInputStream(file).use { fis ->
@@ -835,10 +1085,233 @@ object CryptoSecurityManager {
         }
     }
 
+    fun isStreamEncryptedFile(file: File): Boolean = isStreamV4File(file) || isStreamV3File(file)
+
     /**
-     * Streams decryption of an encrypted vault/recycle-bin file to targetPlainFile using a .tmp staging file.
-     * If decryption or authentication fails at any chunk, deletes the partial .tmp file and returns false
-     * without corrupting targetPlainFile or deleting encryptedFile.
+     * Reads and validates either a V4 Envelope header (88 bytes) or a legacy V3 header (28 bytes)
+     * without decrypting any video payload bytes.
+     */
+    fun readStreamV3Header(file: File): StreamV3Header? = readStreamHeader(file)
+
+    fun readStreamHeader(file: File): StreamV3Header? {
+        if (!file.exists() || !file.isFile || file.length() < STREAM_MAGIC_HEADER.size + GCM_IV_LENGTH + 8) {
+            return null
+        }
+        return try {
+            DataInputStream(BufferedInputStream(FileInputStream(file), 128)).use { dis ->
+                val magic = ByteArray(STREAM_MAGIC_HEADER.size)
+                dis.readFully(magic)
+                when {
+                    magic.contentEquals(STREAM_MAGIC_HEADER_V4) -> {
+                        if (file.length() < STREAM_V4_HEADER_SIZE_BYTES) return null
+                        val dekWrapIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(dekWrapIv)
+                        val wrappedFileDek = ByteArray(STREAM_V4_WRAPPED_DEK_BYTES)
+                        dis.readFully(wrappedFileDek)
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val plainLength = dis.readLong()
+                        if (plainLength <= 0L) return null
+                        StreamV3Header(
+                            baseIv = baseIv,
+                            totalPlainLength = plainLength,
+                            headerSizeBytes = STREAM_V4_HEADER_SIZE_BYTES,
+                            version = 4,
+                            dekWrapIv = dekWrapIv,
+                            wrappedFileDek = wrappedFileDek
+                        )
+                    }
+                    magic.contentEquals(STREAM_MAGIC_HEADER) -> {
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val plainLength = dis.readLong()
+                        if (plainLength <= 0L) return null
+                        StreamV3Header(
+                            baseIv = baseIv,
+                            totalPlainLength = plainLength,
+                            headerSizeBytes = (STREAM_MAGIC_HEADER.size + GCM_IV_LENGTH + 8).toLong(),
+                            version = 3
+                        )
+                    }
+                    else -> null
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Unwraps the per-file 256-bit DEK from a V4 Envelope header using the active master KEK.
+     * For legacy V3 headers, returns the master KEK directly so callers share one unified code path.
+     */
+    fun resolveStreamFileKey(context: Context, header: StreamV3Header): SecretKey? {
+        val masterKek = getOrCreateDataEncryptionKey(context)
+        return resolveStreamFileKeyWithKek(header, masterKek)
+    }
+
+    fun resolveStreamFileKeyWithKek(header: StreamV3Header, masterKek: SecretKey): SecretKey? {
+        if (header.version == 4) {
+            val wrapIv = header.dekWrapIv ?: return null
+            val wrappedDek = header.wrappedFileDek ?: return null
+            val rawDek = unwrapFileDekBytesWithKek(wrapIv, wrappedDek, masterKek) ?: return null
+            val key = SecretKeySpec(rawDek, "AES")
+            Arrays.fill(rawDek, 0.toByte())
+            return key
+        }
+        return masterKek
+    }
+
+    /**
+     * Prepares a 60-byte `[12B newDekWrapIv][48B newWrappedFileDek]` header replacement payload in RAM
+     * for two-phase O(1) KEK rotation of a V4 Envelope file without modifying disk or touching video payload.
+     */
+    fun prepareStreamV4HeaderRewrap(
+        encryptedFile: File,
+        oldKek: SecretKey,
+        newKek: SecretKey
+    ): ByteArray? {
+        val header = readStreamHeader(encryptedFile) ?: return null
+        if (header.version != 4) return null
+        val wrapIv = header.dekWrapIv ?: return null
+        val wrappedDek = header.wrappedFileDek ?: return null
+        val rawDek = unwrapFileDekBytesWithKek(wrapIv, wrappedDek, oldKek) ?: return null
+        return try {
+            val (newWrapIv, newWrappedDek) = wrapFileDekWithKek(rawDek, newKek)
+            // Verify round-trip unwrap under newKek before returning staged header payload
+            val verifyDek = unwrapFileDekBytesWithKek(newWrapIv, newWrappedDek, newKek) ?: return null
+            val verified = MessageDigest.isEqual(rawDek, verifyDek)
+            Arrays.fill(verifyDek, 0.toByte())
+            if (!verified) return null
+            ByteArray(GCM_IV_LENGTH + STREAM_V4_WRAPPED_DEK_BYTES).also { payload ->
+                System.arraycopy(newWrapIv, 0, payload, 0, GCM_IV_LENGTH)
+                System.arraycopy(newWrappedDek, 0, payload, GCM_IV_LENGTH, STREAM_V4_WRAPPED_DEK_BYTES)
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            Arrays.fill(rawDek, 0.toByte())
+        }
+    }
+
+    /**
+     * Commits a previously prepared 60-byte V4 DEK envelope payload into bytes `[8..67]` of [encryptedFile].
+     * O(1) I/O regardless of video size — zero plaintext ever touches flash storage.
+     */
+    fun commitStreamV4HeaderRewrap(encryptedFile: File, preparedEnvelopePayload: ByteArray): Boolean {
+        if (preparedEnvelopePayload.size != GCM_IV_LENGTH + STREAM_V4_WRAPPED_DEK_BYTES) return false
+        if (!encryptedFile.exists() || !encryptedFile.isFile || encryptedFile.length() < STREAM_V4_HEADER_SIZE_BYTES) {
+            return false
+        }
+        return try {
+            java.io.RandomAccessFile(encryptedFile, "rws").use { raf ->
+                val magic = ByteArray(STREAM_MAGIC_HEADER_V4.size)
+                raf.seek(0L)
+                raf.readFully(magic)
+                if (!magic.contentEquals(STREAM_MAGIC_HEADER_V4)) return false
+                raf.seek(STREAM_MAGIC_HEADER_V4.size.toLong())
+                raf.write(preparedEnvelopePayload)
+                runCatching { raf.fd.sync() }
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * O(1) zero-plaintext KEK rotation for a V4 Envelope encrypted file: unwraps the 32-byte per-file DEK
+     * under [oldKek], re-wraps it under [newKek] with a fresh GCM IV, and updates only bytes `[8..67]` in-place.
+     */
+    fun rewrapStreamV4HeaderInPlace(encryptedFile: File, oldKek: SecretKey, newKek: SecretKey): Boolean {
+        val payload = prepareStreamV4HeaderRewrap(encryptedFile, oldKek, newKek) ?: return false
+        return try {
+            commitStreamV4HeaderRewrap(encryptedFile, payload)
+        } finally {
+            Arrays.fill(payload, 0.toByte())
+        }
+    }
+
+    /**
+     * Authenticates and decrypts a single V3 AES-256-GCM chunk in RAM using the active DEK.
+     * Throws AEADBadTagException / GeneralSecurityException if tampered or wrong key.
+     */
+    fun decryptStreamV3Chunk(
+        context: Context,
+        baseIv: ByteArray,
+        chunkIndex: Long,
+        isFinal: Boolean,
+        encryptedChunk: ByteArray,
+        offset: Int = 0,
+        length: Int = encryptedChunk.size
+    ): ByteArray {
+        val key = getOrCreateDataEncryptionKey(context)
+        return decryptStreamV3ChunkWithKey(key, baseIv, chunkIndex, isFinal, encryptedChunk, offset, length)
+    }
+
+    fun decryptStreamV3ChunkWithKey(
+        key: SecretKey,
+        baseIv: ByteArray,
+        chunkIndex: Long,
+        isFinal: Boolean,
+        encryptedChunk: ByteArray,
+        offset: Int = 0,
+        length: Int = encryptedChunk.size
+    ): ByteArray {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val chunkIv = deriveChunkIv(baseIv, chunkIndex)
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
+        cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
+        return cipher.doFinal(encryptedChunk, offset, length)
+    }
+
+    /**
+     * Zero-allocation V3/V4 AES-256-GCM chunk decryptor reusing a caller-owned [Cipher] and
+     * [outputPlainBuffer] to avoid per-chunk Cipher and 256 KB ByteArray allocations during playback.
+     */
+    fun decryptStreamV3ChunkInto(
+        context: Context,
+        reusableCipher: Cipher,
+        baseIv: ByteArray,
+        chunkIndex: Long,
+        isFinal: Boolean,
+        encryptedChunk: ByteArray,
+        encryptedLength: Int,
+        outputPlainBuffer: ByteArray
+    ): Int {
+        val key = getOrCreateDataEncryptionKey(context)
+        return decryptStreamChunkIntoWithKey(
+            chunkKey = key,
+            reusableCipher = reusableCipher,
+            baseIv = baseIv,
+            chunkIndex = chunkIndex,
+            isFinal = isFinal,
+            encryptedChunk = encryptedChunk,
+            encryptedLength = encryptedLength,
+            outputPlainBuffer = outputPlainBuffer
+        )
+    }
+
+    fun decryptStreamChunkIntoWithKey(
+        chunkKey: SecretKey,
+        reusableCipher: Cipher,
+        baseIv: ByteArray,
+        chunkIndex: Long,
+        isFinal: Boolean,
+        encryptedChunk: ByteArray,
+        encryptedLength: Int,
+        outputPlainBuffer: ByteArray
+    ): Int {
+        val chunkIv = deriveChunkIv(baseIv, chunkIndex)
+        reusableCipher.init(Cipher.DECRYPT_MODE, chunkKey, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
+        reusableCipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
+        return reusableCipher.doFinal(encryptedChunk, 0, encryptedLength, outputPlainBuffer, 0)
+    }
+
+    /**
+     * Streams decryption of an encrypted vault/recycle-bin file (V4, V3, or legacy V2) to targetPlainFile
+     * using a .tmp staging file. If authentication fails at any chunk, deletes the partial .tmp file
+     * and returns false without corrupting targetPlainFile or deleting encryptedFile.
      */
     fun decryptFileFromDisk(context: Context, encryptedFile: File, targetPlainFile: File): Boolean {
         val key = getOrCreateDataEncryptionKey(context)
@@ -854,74 +1327,72 @@ object CryptoSecurityManager {
         val stagingFile = File(parentDir, "${targetPlainFile.name}.dec_tmp_${System.nanoTime()}")
 
         try {
-            if (isStreamV3File(encryptedFile)) {
-                DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
-                    val magic = ByteArray(STREAM_MAGIC_HEADER.size)
-                    dis.readFully(magic)
-                    if (!magic.contentEquals(STREAM_MAGIC_HEADER)) {
-                        stagingFile.delete()
-                        return false
-                    }
-                    val baseIv = ByteArray(GCM_IV_LENGTH)
-                    dis.readFully(baseIv)
-                    val expectedPlainLength = dis.readLong()
-                    if (expectedPlainLength <= 0L) {
-                        stagingFile.delete()
-                        return false
-                    }
-
-                    var writtenPlainBytes = 0L
-                    var chunkIndex = 0L
-                    var sawFinalChunk = false
-
-                    FileOutputStream(stagingFile).use { fos ->
-                        BufferedOutputStream(fos, STREAM_CHUNK_SIZE).use { out ->
-                            while (writtenPlainBytes < expectedPlainLength) {
-                                val encryptedChunkSize = dis.readInt()
-                                if (encryptedChunkSize <= GCM_TAG_BYTES ||
-                                    encryptedChunkSize > STREAM_CHUNK_SIZE + GCM_TAG_BYTES + 1024
-                                ) {
-                                    throw IllegalStateException("Invalid encrypted chunk size")
-                                }
-                                val encryptedChunk = ByteArray(encryptedChunkSize)
-                                dis.readFully(encryptedChunk)
-                                val chunkPlainSize = (encryptedChunkSize - GCM_TAG_BYTES).toLong()
-                                val isFinal = (writtenPlainBytes + chunkPlainSize) == expectedPlainLength
-
-                                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                                val chunkIv = deriveChunkIv(baseIv, chunkIndex)
-                                cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
-                                cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
-                                val plainChunk = cipher.doFinal(encryptedChunk)
-
-                                out.write(plainChunk)
-                                writtenPlainBytes += plainChunk.size.toLong()
-                                Arrays.fill(plainChunk, 0.toByte())
-                                if (isFinal) sawFinalChunk = true
-                                chunkIndex++
-                            }
-                            out.flush()
+            when {
+                isStreamV4File(encryptedFile) -> {
+                    DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
+                        val magic = ByteArray(STREAM_MAGIC_HEADER_V4.size)
+                        dis.readFully(magic)
+                        if (!magic.contentEquals(STREAM_MAGIC_HEADER_V4)) {
+                            stagingFile.delete()
+                            return false
                         }
-                        try {
-                            fos.fd.sync()
-                        } catch (_: Exception) {}
-                    }
+                        val dekWrapIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(dekWrapIv)
+                        val wrappedDek = ByteArray(STREAM_V4_WRAPPED_DEK_BYTES)
+                        dis.readFully(wrappedDek)
+                        val rawDek = unwrapFileDekBytesWithKek(dekWrapIv, wrappedDek, key)
+                        if (rawDek == null) {
+                            stagingFile.delete()
+                            return false
+                        }
+                        val fileDek = SecretKeySpec(rawDek, "AES")
+                        Arrays.fill(rawDek, 0.toByte())
 
-                    if (!sawFinalChunk || writtenPlainBytes != expectedPlainLength || stagingFile.length() != expectedPlainLength) {
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val expectedPlainLength = dis.readLong()
+                        if (expectedPlainLength <= 0L) {
+                            stagingFile.delete()
+                            return false
+                        }
+                        if (!decryptStreamChunksToFile(dis, fileDek, baseIv, expectedPlainLength, stagingFile)) {
+                            stagingFile.delete()
+                            return false
+                        }
+                    }
+                }
+                isStreamV3File(encryptedFile) -> {
+                    DataInputStream(BufferedInputStream(FileInputStream(encryptedFile), STREAM_CHUNK_SIZE)).use { dis ->
+                        val magic = ByteArray(STREAM_MAGIC_HEADER.size)
+                        dis.readFully(magic)
+                        if (!magic.contentEquals(STREAM_MAGIC_HEADER)) {
+                            stagingFile.delete()
+                            return false
+                        }
+                        val baseIv = ByteArray(GCM_IV_LENGTH)
+                        dis.readFully(baseIv)
+                        val expectedPlainLength = dis.readLong()
+                        if (expectedPlainLength <= 0L) {
+                            stagingFile.delete()
+                            return false
+                        }
+                        if (!decryptStreamChunksToFile(dis, key, baseIv, expectedPlainLength, stagingFile)) {
+                            stagingFile.delete()
+                            return false
+                        }
+                    }
+                }
+                else -> {
+                    // Backward-compatible legacy v2 single-block decryption
+                    val encryptedBytes = encryptedFile.readBytes()
+                    val plainBytes = decryptBytesWithKey(encryptedBytes, key)
+                    if (plainBytes == null || plainBytes.isEmpty()) {
                         stagingFile.delete()
                         return false
                     }
+                    stagingFile.writeBytes(plainBytes)
+                    Arrays.fill(plainBytes, 0.toByte())
                 }
-            } else {
-                // Backward-compatible legacy v2 single-block decryption
-                val encryptedBytes = encryptedFile.readBytes()
-                val plainBytes = decryptBytesWithKey(encryptedBytes, key)
-                if (plainBytes == null || plainBytes.isEmpty()) {
-                    stagingFile.delete()
-                    return false
-                }
-                stagingFile.writeBytes(plainBytes)
-                Arrays.fill(plainBytes, 0.toByte())
             }
 
             if (targetPlainFile.exists()) {
@@ -941,12 +1412,62 @@ object CryptoSecurityManager {
         }
     }
 
+    private fun decryptStreamChunksToFile(
+        dis: DataInputStream,
+        chunkKey: SecretKey,
+        baseIv: ByteArray,
+        expectedPlainLength: Long,
+        stagingFile: File
+    ): Boolean {
+        var writtenPlainBytes = 0L
+        var chunkIndex = 0L
+        var sawFinalChunk = false
+
+        FileOutputStream(stagingFile).use { fos ->
+            BufferedOutputStream(fos, STREAM_CHUNK_SIZE).use { out ->
+                while (writtenPlainBytes < expectedPlainLength) {
+                    val encryptedChunkSize = dis.readInt()
+                    if (encryptedChunkSize <= GCM_TAG_BYTES ||
+                        encryptedChunkSize > STREAM_CHUNK_SIZE + GCM_TAG_BYTES + 1024
+                    ) {
+                        throw IllegalStateException("Invalid encrypted chunk size")
+                    }
+                    val encryptedChunk = ByteArray(encryptedChunkSize)
+                    dis.readFully(encryptedChunk)
+                    val chunkPlainSize = (encryptedChunkSize - GCM_TAG_BYTES).toLong()
+                    val isFinal = (writtenPlainBytes + chunkPlainSize) == expectedPlainLength
+
+                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                    val chunkIv = deriveChunkIv(baseIv, chunkIndex)
+                    cipher.init(Cipher.DECRYPT_MODE, chunkKey, GCMParameterSpec(GCM_TAG_BITS, chunkIv))
+                    cipher.updateAAD(buildChunkAad(chunkIndex, isFinal))
+                    val plainChunk = cipher.doFinal(encryptedChunk)
+
+                    out.write(plainChunk)
+                    writtenPlainBytes += plainChunk.size.toLong()
+                    Arrays.fill(plainChunk, 0.toByte())
+                    if (isFinal) sawFinalChunk = true
+                    chunkIndex++
+                }
+                out.flush()
+                try {
+                    fos.fd.sync()
+                } catch (_: Exception) {}
+            }
+        }
+        return sawFinalChunk && writtenPlainBytes == expectedPlainLength && stagingFile.length() == expectedPlainLength
+    }
+
     /**
-     * Re-encrypts an encrypted file on disk from oldKey to newKey using streaming decryption + encryption
-     * and atomic staging so interrupted key rotation never corrupts or loses vault/trash files.
+     * Rotates an encrypted file from [oldKey] to [newKey]:
+     * - For V4 Envelope files: performs O(1) instant in-place header re-wrap (zero plaintext, 60 bytes written).
+     * - For legacy V3/V2 files: streams an upgrade into a V4 Envelope file atomically.
      */
     fun reEncryptFileOnDisk(encryptedFile: File, oldKey: SecretKey, newKey: SecretKey): Boolean {
         if (!encryptedFile.exists() || !encryptedFile.isFile) return false
+        if (isStreamV4File(encryptedFile)) {
+            return rewrapStreamV4HeaderInPlace(encryptedFile, oldKey, newKey)
+        }
         val parentDir = encryptedFile.parentFile ?: return false
         val tempPlain = File(parentDir, "${encryptedFile.name}.rot_plain_${System.nanoTime()}")
         val tempReEnc = File(parentDir, "${encryptedFile.name}.rot_enc_${System.nanoTime()}")
@@ -955,16 +1476,12 @@ object CryptoSecurityManager {
                 shredFileZeroTrace(tempPlain)
                 return false
             }
-            if (!encryptFileToDiskWithKey(tempPlain, tempReEnc, newKey)) {
+            if (!encryptFileToStreamV4WithKek(tempPlain, tempReEnc, newKey)) {
                 shredFileZeroTrace(tempPlain)
                 tempReEnc.delete()
                 return false
             }
             shredFileZeroTrace(tempPlain)
-            if (!verifyEncryptedFileIntegrityWithKey(tempReEnc, newKey)) {
-                tempReEnc.delete()
-                return false
-            }
             if (encryptedFile.exists()) {
                 encryptedFile.delete()
             }
@@ -1387,22 +1904,20 @@ object CryptoSecurityManager {
             isVerified = verified
         )
 
-        // Write companion signature manifest
+        // Write companion signature manifest with proper JSON escaping via org.json.JSONObject
         val companionFile = File(file.parentFile ?: file, "${file.name}.sig.json")
         try {
-            val json = """
-            {
-              "filename": "${manifest.filename}",
-              "fileSize": ${manifest.fileSize},
-              "sha256": "${manifest.sha256Digest}",
-              "signature": "${manifest.signatureHex}",
-              "signer": "${manifest.signerAlias}",
-              "algorithm": "${manifest.algorithm}",
-              "timestampMs": ${manifest.timestampMs},
-              "verified": ${manifest.isVerified}
+            val jsonObject = org.json.JSONObject().apply {
+                put("filename", manifest.filename)
+                put("fileSize", manifest.fileSize)
+                put("sha256", manifest.sha256Digest)
+                put("signature", manifest.signatureHex)
+                put("signer", manifest.signerAlias)
+                put("algorithm", manifest.algorithm)
+                put("timestampMs", manifest.timestampMs)
+                put("verified", manifest.isVerified)
             }
-            """.trimIndent()
-            companionFile.writeText(json)
+            companionFile.writeText(jsonObject.toString(2))
         } catch (_: Exception) {
             // Non-fatal if companion cannot write to read-only folder
         }

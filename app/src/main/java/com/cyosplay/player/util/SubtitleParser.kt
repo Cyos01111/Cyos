@@ -281,15 +281,65 @@ object SubtitleParser {
         }
     }
 
+    const val MAX_SUBTITLE_BYTES: Int = 10 * 1024 * 1024
+
+    data class SubtitleEncodingOption(
+        val id: String,
+        val label: String
+    )
+
+    val SUPPORTED_SUBTITLE_ENCODINGS: List<SubtitleEncodingOption> = listOf(
+        SubtitleEncodingOption("AUTO", "Auto-Detect"),
+        SubtitleEncodingOption("UTF-8", "UTF-8"),
+        SubtitleEncodingOption("windows-1252", "Western (Win-1252)"),
+        SubtitleEncodingOption("windows-1251", "Cyrillic (Win-1251)"),
+        SubtitleEncodingOption("windows-1256", "Arabic (Win-1256)"),
+        SubtitleEncodingOption("windows-1250", "Central EU (Win-1250)"),
+        SubtitleEncodingOption("windows-1254", "Turkish (Win-1254)"),
+        SubtitleEncodingOption("windows-1253", "Greek (Win-1253)"),
+        SubtitleEncodingOption("windows-1255", "Hebrew (Win-1255)"),
+        SubtitleEncodingOption("ISO-8859-1", "Latin-1 (ISO-8859-1)"),
+        SubtitleEncodingOption("Shift_JIS", "Japanese (Shift_JIS)"),
+        SubtitleEncodingOption("EUC-KR", "Korean (EUC-KR)"),
+        SubtitleEncodingOption("GB18030", "Chinese (GB18030)"),
+        SubtitleEncodingOption("Big5", "Trad. Chinese (Big5)"),
+        SubtitleEncodingOption("TIS-620", "Thai (TIS-620)"),
+        SubtitleEncodingOption("KOI8-R", "Russian (KOI8-R)")
+    )
+
     /**
-     * Decodes raw subtitle bytes using BOM detection (UTF-8, UTF-16LE, UTF-16BE, UTF-32)
-     * followed by strict UTF-8 validation and automatic multi-language charset fallback
-     * (GB18030, Big5, Shift_JIS, EUC-KR, Windows-1256 Arabic, Windows-1251 Cyrillic,
-     * Windows-1255 Hebrew, Windows-1254 Turkish, Windows-1253 Greek, Windows-1250 Central European,
-     * Windows-1258 Vietnamese, TIS-620 Thai, KOI8-R, Windows-1252, ISO-8859-1).
+     * Decodes raw subtitle bytes using optional manual charset override, BOM detection
+     * (UTF-8, UTF-16LE, UTF-16BE, UTF-32), strict UTF-8 validation, and heuristic scoring
+     * across regional single-byte and CJK charsets so European, Cyrillic, Arabic, and CJK
+     * subtitles never mis-decode as garbled text.
      */
-    fun decodeSubtitleBytesMultiLanguage(bytes: ByteArray): String {
+    fun decodeSubtitleBytesMultiLanguage(
+        bytes: ByteArray,
+        preferredEncoding: String = "AUTO",
+        localeHint: java.util.Locale = java.util.Locale.getDefault()
+    ): String {
         if (bytes.isEmpty()) return ""
+        val trimmedPref = preferredEncoding.trim()
+        if (trimmedPref.isNotEmpty() && !trimmedPref.equals("AUTO", ignoreCase = true)) {
+            if (Charset.isSupported(trimmedPref)) {
+                val cs = Charset.forName(trimmedPref)
+                val decoded = runCatching {
+                    val startOffset = if (
+                        trimmedPref.equals("UTF-8", ignoreCase = true) &&
+                        bytes.size >= 3 &&
+                        bytes[0] == 0xEF.toByte() &&
+                        bytes[1] == 0xBB.toByte() &&
+                        bytes[2] == 0xBF.toByte()
+                    ) 3 else 0
+                    val decoder = cs.newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPLACE)
+                        .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                    decoder.decode(ByteBuffer.wrap(bytes, startOffset, bytes.size - startOffset)).toString()
+                }.getOrNull()
+                if (decoded != null) return decoded
+            }
+        }
+
         if (bytes.size >= 4 &&
             bytes[0] == 0x00.toByte() &&
             bytes[1] == 0x00.toByte() &&
@@ -337,50 +387,373 @@ object SubtitleParser {
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
             return decoder.decode(ByteBuffer.wrap(bytes)).toString()
         } catch (_: CharacterCodingException) {
-            // Fallback to regional multi-language charsets
+            // Fall through to heuristic charset scoring
         }
 
-        val fallbackCharsets = listOf(
-            "GB18030",
-            "Big5",
-            "Shift_JIS",
-            "EUC-KR",
-            "windows-1256",
+        val candidates = listOf(
+            "windows-1252",
             "windows-1251",
-            "windows-1255",
+            "windows-1256",
+            "windows-1250",
             "windows-1254",
             "windows-1253",
-            "windows-1250",
+            "windows-1255",
             "windows-1258",
+            "Shift_JIS",
+            "EUC-KR",
+            "GB18030",
+            "Big5",
             "TIS-620",
             "KOI8-R",
-            "windows-1252",
             "ISO-8859-1"
         )
-        for (name in fallbackCharsets) {
-            try {
-                if (Charset.isSupported(name)) {
-                    val cs = Charset.forName(name)
-                    val decoder = cs.newDecoder()
-                        .onMalformedInput(CodingErrorAction.REPORT)
-                        .onUnmappableCharacter(CodingErrorAction.REPORT)
-                    val decoded = decoder.decode(ByteBuffer.wrap(bytes)).toString()
-                    if (decoded.isNotBlank()) return decoded
-                }
+
+        val sampleBytes = if (bytes.size > 65_536) bytes.copyOf(65_536) else bytes
+        val localeLang = localeHint.language.lowercase()
+
+        var bestCharset: Charset? = null
+        var bestScore = Int.MIN_VALUE
+
+        for (name in candidates) {
+            if (!Charset.isSupported(name)) continue
+            val cs = runCatching { Charset.forName(name) }.getOrNull() ?: continue
+            val decodedSample = try {
+                val decoder = cs.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                decoder.decode(ByteBuffer.wrap(sampleBytes)).toString()
             } catch (_: Exception) {
-                // Try next charset
+                continue
             }
+            if (decodedSample.isBlank()) continue
+            val score = scoreDecodedSubtitleCandidate(name, decodedSample, localeLang)
+            if (score > bestScore) {
+                bestScore = score
+                bestCharset = cs
+            }
+        }
+
+        if (bestCharset != null) {
+            return runCatching {
+                val decoder = bestCharset.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(CodingErrorAction.REPLACE)
+                decoder.decode(ByteBuffer.wrap(bytes)).toString()
+            }.getOrElse { String(bytes, Charsets.UTF_8) }
         }
         return String(bytes, Charsets.UTF_8)
     }
 
+    private fun scoreDecodedSubtitleCandidate(
+        charsetName: String,
+        text: String,
+        localeLang: String
+    ): Int {
+        var score = 0
+        var nonAsciiCount = 0
+        var controlOrReplacementCount = 0
+        var cyrillicUpper = 0
+        var cyrillicLower = 0
+        var cyrillicMidWordUpper = 0
+        var arabicCoreLetters = 0
+        var arabicDiacriticsOrNoise = 0
+        var latinExtended = 0
+        var latinConsecutiveRun = 0
+        var latinLongAccentRuns = 0
+        var cjkIdeographs = 0
+        var cjkPunctuation = 0
+        var cjkWordSpaces = 0
+        var japaneseKana = 0
+        var koreanHangul = 0
+        var hangulWordSpaces = 0
+        var greekLetters = 0
+        var hebrewLetters = 0
+        var thaiLetters = 0
+        var nonAsciiAlphaRun = 0
+        var longNonAsciiAlphaRuns = 0
+        var mixedWordScriptSwitches = 0
+        var prevKind = 0 // 0=sep, 1=asciiLetter, 2=latinExt, 3=cyrillic, 4=arabic, 5=cjk, 6=other, 7=hangul
+
+        for (i in text.indices) {
+            val ch = text[i]
+            val code = ch.code
+
+            if (ch == '\uFFFD' ||
+                (code in 0x00..0x08) ||
+                code == 0x0B ||
+                code == 0x0C ||
+                (code in 0x0E..0x1F) ||
+                (code in 0x7F..0x9F) ||
+                code == 0x200E ||
+                code == 0x200F
+            ) {
+                controlOrReplacementCount++
+                prevKind = 0
+                latinConsecutiveRun = 0
+                nonAsciiAlphaRun = 0
+                continue
+            }
+
+            if (code < 0x80) {
+                if (ch == ' ') {
+                    if (prevKind == 7) hangulWordSpaces++
+                    else if (prevKind == 5) cjkWordSpaces++
+                }
+                latinConsecutiveRun = 0
+                nonAsciiAlphaRun = 0
+                val isAsciiLetter = (code in 'A'.code..'Z'.code) || (code in 'a'.code..'z'.code)
+                if (isAsciiLetter) {
+                    if (prevKind == 3 || prevKind == 4) {
+                        mixedWordScriptSwitches++
+                    }
+                    prevKind = 1
+                } else {
+                    prevKind = 0
+                }
+                continue
+            }
+
+            nonAsciiCount++
+            when {
+                // Hiragana / Katakana
+                code in 0x3040..0x30FF -> {
+                    japaneseKana++
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 5
+                }
+                // Hangul Syllables
+                code in 0xAC00..0xD7AF -> {
+                    koreanHangul++
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 7
+                }
+                // Common CJK Unified Ideographs
+                code in 0x4E00..0x9FFF -> {
+                    cjkIdeographs++
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 5
+                }
+                // CJK Symbols, Punctuation & Fullwidth Forms (e.g., ，。！？：《》)
+                code in 0x3000..0x303F || code in 0xFF01..0xFF60 -> {
+                    cjkPunctuation++
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 0
+                }
+                // Cyrillic (Russian/Ukrainian/Bulgarian)
+                code in 0x0410..0x042F || code == 0x0401 -> {
+                    cyrillicUpper++
+                    if (prevKind == 3) {
+                        cyrillicMidWordUpper++
+                    }
+                    if (prevKind == 1) mixedWordScriptSwitches++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 3
+                }
+                code in 0x0430..0x044F || code == 0x0451 -> {
+                    cyrillicLower++
+                    if (prevKind == 1) mixedWordScriptSwitches++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 3
+                }
+                // Core Arabic letters (Alef through Yeh + Persian/Urdu extensions)
+                code in 0x0621..0x063A || code in 0x0641..0x064A || code in 0x067E..0x06CC -> {
+                    arabicCoreLetters++
+                    if (prevKind == 1) mixedWordScriptSwitches++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 4
+                }
+                // Arabic diacritics (harakat) - rare in bulk unless mis-decoded
+                code in 0x064B..0x065F -> {
+                    arabicDiacriticsOrNoise++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 4
+                }
+                // Greek
+                code in 0x0386..0x03CE -> {
+                    greekLetters++
+                    if (prevKind == 1) mixedWordScriptSwitches++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 6
+                }
+                // Hebrew
+                code in 0x05D0..0x05EA -> {
+                    hebrewLetters++
+                    if (prevKind == 1) mixedWordScriptSwitches++
+                    nonAsciiAlphaRun++
+                    if (nonAsciiAlphaRun > 16) longNonAsciiAlphaRuns++
+                    latinConsecutiveRun = 0
+                    prevKind = 6
+                }
+                // Thai
+                code in 0x0E01..0x0E5B -> {
+                    thaiLetters++
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 6
+                }
+                // Latin-1 Supplement / Latin Extended letters (Spanish/French/German/Central EU/Turkish)
+                code in 0x00C0..0x024F || code == 0x00A1 || code == 0x00BF -> {
+                    latinExtended++
+                    if (code in 0x00C0..0x024F) {
+                        latinConsecutiveRun++
+                        if (latinConsecutiveRun >= 3) {
+                            latinLongAccentRuns++
+                        }
+                    } else {
+                        latinConsecutiveRun = 0
+                    }
+                    nonAsciiAlphaRun = 0
+                    prevKind = 2
+                }
+                // Common typographic punctuation (smart quotes, em-dash, ellipsis, euro)
+                code in 0x2013..0x2026 || code == 0x20AC -> {
+                    score += 3
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 0
+                }
+                // Halfwidth katakana flood or private-use / obscure symbols
+                code in 0xFF61..0xFF9F || code in 0xE000..0xF8FF -> {
+                    score -= 10
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 6
+                }
+                else -> {
+                    score -= 2
+                    latinConsecutiveRun = 0
+                    nonAsciiAlphaRun = 0
+                    prevKind = 6
+                }
+            }
+        }
+
+        // Strong penalties for control characters, replacement characters, and mixed scripts inside words
+        score -= controlOrReplacementCount * 40
+        score -= mixedWordScriptSwitches * 18
+
+        // Reward coherent scripts (2-byte CJK encodings consume 2 bytes per glyph)
+        when (charsetName) {
+            "Shift_JIS" -> {
+                score += japaneseKana * 24 + cjkIdeographs * 16 + cjkPunctuation * 14
+                if (japaneseKana == 0 && cjkIdeographs < 4) score -= 40
+            }
+            "EUC-KR" -> {
+                score += koreanHangul * 18 + hangulWordSpaces * 14 + cjkPunctuation * 6
+                // Modern Korean subtitles rarely interleave archaic Hanja with Hangul
+                score -= cjkIdeographs * 14
+                if (koreanHangul >= 8 && hangulWordSpaces == 0) score -= 45
+                if (koreanHangul == 0) score -= 50
+            }
+            "GB18030", "Big5" -> {
+                score += cjkIdeographs * 18 + cjkPunctuation * 14
+                score -= cjkWordSpaces * 18
+                if (charsetName == "GB18030") score += 6
+                if (cjkIdeographs < 3) score -= 50
+            }
+            "windows-1251", "KOI8-R" -> {
+                score += cyrillicLower * 10 + cyrillicUpper * 5
+                score -= cyrillicMidWordUpper * 25
+                score -= longNonAsciiAlphaRuns * 18
+                if (cyrillicLower == 0 && cyrillicUpper == 0) score -= 30
+                // Natural Russian prose has far more lowercase than uppercase Cyrillic
+                if (cyrillicUpper > cyrillicLower && cyrillicUpper > 4) score -= (cyrillicUpper - cyrillicLower) * 12
+            }
+            "windows-1256" -> {
+                score += arabicCoreLetters * 10
+                score -= arabicDiacriticsOrNoise * 16
+                score -= latinExtended * 12
+                score -= longNonAsciiAlphaRuns * 18
+                if (arabicCoreLetters == 0) score -= 35
+            }
+            "windows-1253" -> {
+                score += greekLetters * 10
+                score -= longNonAsciiAlphaRuns * 18
+                if (greekLetters == 0) score -= 35
+            }
+            "windows-1255" -> {
+                score += hebrewLetters * 10
+                score -= longNonAsciiAlphaRuns * 18
+                if (hebrewLetters == 0) score -= 35
+            }
+            "TIS-620" -> {
+                score += thaiLetters * 10
+                if (thaiLetters == 0) score -= 35
+            }
+            "windows-1252", "ISO-8859-1", "windows-1250", "windows-1254", "windows-1258" -> {
+                score += latinExtended * 8
+                // Real Western/Central European words rarely have 3+ consecutive accented Latin letters
+                score -= latinLongAccentRuns * 35
+                if (charsetName == "windows-1252") score += 4 // Prefer Win-1252 over ISO-8859-1 on tie
+            }
+        }
+
+        // Modest locale tie-breaker so device language breaks near-ties without overriding clear scripts
+        val localeMatches = when (charsetName) {
+            "windows-1252", "ISO-8859-1" -> localeLang in setOf("en", "es", "fr", "de", "it", "pt", "nl", "sv", "no", "da", "fi", "id", "ms")
+            "windows-1251", "KOI8-R" -> localeLang in setOf("ru", "uk", "bg", "sr", "kk", "be")
+            "windows-1256" -> localeLang in setOf("ar", "fa", "ur")
+            "windows-1250" -> localeLang in setOf("pl", "cs", "sk", "hu", "ro", "hr", "sl")
+            "windows-1254" -> localeLang in setOf("tr", "az")
+            "windows-1253" -> localeLang == "el"
+            "windows-1255" -> localeLang in setOf("he", "iw")
+            "windows-1258" -> localeLang == "vi"
+            "TIS-620" -> localeLang == "th"
+            "Shift_JIS" -> localeLang == "ja"
+            "EUC-KR" -> localeLang == "ko"
+            "GB18030", "Big5" -> localeLang == "zh"
+            else -> false
+        }
+        if (localeMatches && nonAsciiCount > 0) {
+            score += 12
+        }
+
+        return score
+    }
+
     /**
-     * Reads and decodes a subtitle [java.io.InputStream] using multi-language BOM & charset auto-detection
-     * and parses all cues.
+     * Reads up to [maxBytes] from [inputStream] to prevent OOM on corrupt or oversized files.
      */
-    fun parseSubtitleStream(inputStream: java.io.InputStream): List<SubtitleCueItem> {
-        val bytes = inputStream.readBytes()
-        val decoded = decodeSubtitleBytesMultiLanguage(bytes)
+    fun readBoundedBytes(
+        inputStream: java.io.InputStream,
+        maxBytes: Int = MAX_SUBTITLE_BYTES
+    ): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var remaining = maxBytes
+        while (remaining > 0) {
+            val read = inputStream.read(buffer, 0, minOf(buffer.size, remaining))
+            if (read <= 0) break
+            out.write(buffer, 0, read)
+            remaining -= read
+        }
+        return out.toByteArray()
+    }
+
+    /**
+     * Reads and decodes a subtitle [java.io.InputStream] using bounded read (max 10 MB),
+     * multi-language BOM & heuristic charset detection (or manual override), and parses all cues.
+     */
+    fun parseSubtitleStream(
+        inputStream: java.io.InputStream,
+        preferredEncoding: String = "AUTO"
+    ): List<SubtitleCueItem> {
+        val bytes = readBoundedBytes(inputStream, MAX_SUBTITLE_BYTES)
+        val decoded = decodeSubtitleBytesMultiLanguage(bytes, preferredEncoding = preferredEncoding)
         return parseSubtitleText(decoded)
     }
 
@@ -650,6 +1023,58 @@ object SubtitleParser {
         } else {
             formatSubtitleTextForDisplay(rawText)
         }
+    }
+
+    /**
+     * Computes the earliest cue transition timestamp (either the end of an active cue + 1ms,
+     * or the start of the next upcoming cue) strictly greater than [adjustedPositionMs].
+     * Returns null when no further cue transitions exist after [adjustedPositionMs].
+     */
+    fun findNextSubtitleEventTimeMs(
+        cues: List<SubtitleCueItem>,
+        adjustedPositionMs: Long
+    ): Long? {
+        if (cues.isEmpty()) return null
+        if (adjustedPositionMs < cues.first().startTimeMs) {
+            return cues.first().startTimeMs
+        }
+
+        var low = 0
+        var high = cues.lastIndex
+        var candidateIdx = -1
+        while (low <= high) {
+            val mid = (low + high) ushr 1
+            if (cues[mid].startTimeMs <= adjustedPositionMs) {
+                candidateIdx = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+
+        var earliestEventMs = Long.MAX_VALUE
+        if (candidateIdx >= 0) {
+            val windowStart = (candidateIdx - 8).coerceAtLeast(0)
+            for (i in windowStart..candidateIdx) {
+                val cue = cues[i]
+                if (cue.endTimeMs >= adjustedPositionMs) {
+                    val endEvent = cue.endTimeMs + 1L
+                    if (endEvent < earliestEventMs) {
+                        earliestEventMs = endEvent
+                    }
+                }
+            }
+        }
+
+        val nextStartIdx = candidateIdx + 1
+        if (nextStartIdx in cues.indices) {
+            val nextStart = cues[nextStartIdx].startTimeMs
+            if (nextStart > adjustedPositionMs && nextStart < earliestEventMs) {
+                earliestEventMs = nextStart
+            }
+        }
+
+        return if (earliestEventMs == Long.MAX_VALUE) null else earliestEventMs
     }
 
     private fun parseFlexibleTimestampMs(raw: String): Long {

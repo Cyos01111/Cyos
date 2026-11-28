@@ -67,24 +67,31 @@ class VideoRepository(private val context: Context) {
         CryptoSecurityManager.registerRotationListener(rotationListener)
     }
 
+    fun release() {
+        CryptoSecurityManager.unregisterRotationListener(rotationListener)
+    }
+
+    private fun normalizePathFast(rawPath: String): String {
+        val trimmed = rawPath.trim()
+        if (trimmed.isEmpty()) return ""
+        val collapsed = if (trimmed.contains("//")) trimmed.replace(Regex("/+"), "/") else trimmed
+        return collapsed.trimEnd('/').lowercase()
+    }
+
     fun scanDeviceVideos(excludedPaths: Set<String> = emptySet()): List<VideoItem> {
         val relocatedSourcePaths = getRelocatedSourcePaths()
-        val relocatedLower = relocatedSourcePaths.map { it.trim().lowercase() }.toSet()
-        val excludedLower = excludedPaths.map { it.trim().lowercase() }.toSet()
+        val relocatedLower = relocatedSourcePaths.map { normalizePathFast(it) }.toSet()
+        val excludedLower = excludedPaths.map { normalizePathFast(it) }.toSet()
         val mediaStoreVideos = queryMediaStoreVideos()
         val extendedFileVideos = queryExtendedVideoFilesFromMediaStore()
         val managedVideos = getOrCreateManagedCatalog()
 
         val combinedByPath = LinkedHashMap<String, VideoItem>()
         fun isRelocatedOrExcluded(video: VideoItem): Boolean {
-            val normPath = video.path.trim().lowercase()
+            val normPath = normalizePathFast(video.path)
             if (relocatedLower.contains(normPath) || excludedLower.contains(normPath)) return true
-            val normFolderAndName = "${video.folderPath.trimEnd('/')}/${video.displayName}".lowercase()
+            val normFolderAndName = normalizePathFast("${video.folderPath.trimEnd('/')}/${video.displayName}")
             if (relocatedLower.contains(normFolderAndName) || excludedLower.contains(normFolderAndName)) return true
-            try {
-                val canon = File(video.path).canonicalPath.lowercase()
-                if (relocatedLower.contains(canon) || excludedLower.contains(canon)) return true
-            } catch (_: Exception) {}
             return false
         }
 
@@ -134,7 +141,7 @@ class VideoRepository(private val context: Context) {
         val arr = JSONArray()
         paths.forEach { arr.put(it) }
         val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-        prefs.edit().putString(KEY_MOVED_SOURCE_PATHS_ENC, cipher).commit()
+        prefs.edit().putString(KEY_MOVED_SOURCE_PATHS_ENC, cipher).apply()
     }
 
     private fun queryMediaStoreVideos(): List<VideoItem> {
@@ -251,16 +258,28 @@ class VideoRepository(private val context: Context) {
             MediaStore.Files.FileColumns.DISPLAY_NAME,
             MediaStore.Files.FileColumns.DATA,
             MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Video.Media.DURATION,
             MediaStore.Files.FileColumns.DATE_MODIFIED,
             MediaStore.Files.FileColumns.MIME_TYPE
+        )
+        // Indexed MediaStore.Files query (avoids 26 unindexed LOWER(_data) LIKE full-table scans);
+        // Kotlin's isStrictVideoFile() filters MEDIA_TYPE_NONE rows by supported video extensions.
+        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ? OR " +
+            "(${MediaStore.Files.FileColumns.MEDIA_TYPE} = ? AND " +
+            "(${MediaStore.Files.FileColumns.MIME_TYPE} IS NULL OR ${MediaStore.Files.FileColumns.MIME_TYPE} = ? OR ${MediaStore.Files.FileColumns.MIME_TYPE} LIKE ?))"
+        val selectionArgs = arrayOf(
+            MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
+            MediaStore.Files.FileColumns.MEDIA_TYPE_NONE.toString(),
+            "application/octet-stream",
+            "video/%"
         )
         val sortOrder = "${MediaStore.Files.FileColumns.DATE_MODIFIED} DESC"
         try {
             appContext.contentResolver.query(
                 filesUri,
                 projection,
-                null,
-                null,
+                selection,
+                selectionArgs,
                 sortOrder
             )?.use { cursor ->
                 val idCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
@@ -268,6 +287,7 @@ class VideoRepository(private val context: Context) {
                 val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DISPLAY_NAME)
                 val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATA)
                 val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.SIZE)
+                val durCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
                 val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_MODIFIED)
                 val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MIME_TYPE)
 
@@ -290,6 +310,7 @@ class VideoRepository(private val context: Context) {
                     val remuxProfile = AudioBadgeFormatter.parseRemuxStreamProfile(displayName, resolvedMime)
                     val width = if (remuxProfile.isUhd2160p) 3840 else 1920
                     val height = if (remuxProfile.isUhd2160p) 2160 else 1080
+                    val rawDuration = if (durCol >= 0) cursor.getLong(durCol).coerceAtLeast(0L) else 0L
 
                     results.add(
                         VideoItem(
@@ -299,7 +320,7 @@ class VideoRepository(private val context: Context) {
                             uri = ContentUris.withAppendedId(filesUri, id),
                             path = path,
                             sizeBytes = cursor.getLong(sizeCol).coerceAtLeast(1024L),
-                            durationMs = 1_000L,
+                            durationMs = rawDuration,
                             dateModifiedSeconds = cursor.getLong(dateCol),
                             width = width,
                             height = height,
@@ -352,20 +373,10 @@ class VideoRepository(private val context: Context) {
                 }
             }
 
-            val isHindiMpeg4XvidSample = displayName.equals("Hindi.mp4", ignoreCase = true) ||
-                displayName.contains("xvid", ignoreCase = true)
             val remuxProfile = AudioBadgeFormatter.parseRemuxStreamProfile(displayName)
-            var durationMs = if (isHindiMpeg4XvidSample) 375_480L else 1_000L
-            var width = when {
-                isHindiMpeg4XvidSample -> 704
-                remuxProfile.isUhd2160p -> 3840
-                else -> 1920
-            }
-            var height = when {
-                isHindiMpeg4XvidSample -> 396
-                remuxProfile.isUhd2160p -> 2160
-                else -> 1080
-            }
+            var durationMs = 1_000L
+            var width = if (remuxProfile.isUhd2160p) 3840 else 1920
+            var height = if (remuxProfile.isUhd2160p) 2160 else 1080
             var mimeType = appContext.contentResolver.getType(uri) ?: resolveVideoMimeType(displayName)
 
             val retriever = MediaMetadataRetriever()
@@ -400,7 +411,7 @@ class VideoRepository(private val context: Context) {
                 displayName = displayName,
                 uri = uri,
                 path = virtualPath,
-                sizeBytes = if (sizeBytes > 0L) sizeBytes else if (isHindiMpeg4XvidSample) 53_140_533L else 1024L,
+                sizeBytes = if (sizeBytes > 0L) sizeBytes else 1024L,
                 durationMs = durationMs,
                 dateModifiedSeconds = System.currentTimeMillis() / 1000L,
                 width = width,
@@ -412,8 +423,8 @@ class VideoRepository(private val context: Context) {
                 isRemovableStorage = false,
                 audioCodecHint = finalProfile.audioBadge,
                 videoCodecHint = finalProfile.videoBadge,
-                sampleAspectRatio = if (width == 704 && height == 396) "396:563" else "1:1",
-                displayAspectRatio = if (width == 704 && height == 396) "704:563" else ""
+                sampleAspectRatio = "1:1",
+                displayAspectRatio = ""
             )
             if (persistInCatalog) {
                 val current = getOrCreateManagedCatalog().toMutableList()
@@ -466,7 +477,7 @@ class VideoRepository(private val context: Context) {
             )
         }
         val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-        prefs.edit().putString(KEY_MANAGED_VIDEOS_ENC, cipher).commit()
+        prefs.edit().putString(KEY_MANAGED_VIDEOS_ENC, cipher).apply()
     }
 
     private fun parseCatalogJson(json: String): List<VideoItem> {
@@ -1664,7 +1675,7 @@ class VideoRepository(private val context: Context) {
             }
             existingObj.put(details.exactFilePath, itemJson)
             val encrypted = CryptoSecurityManager.encryptVideoDatacode(appContext, existingObj.toString())
-            prefs.edit().putString(KEY_TECHNICAL_DETAILS_CACHE_ENC, encrypted).commit()
+            prefs.edit().putString(KEY_TECHNICAL_DETAILS_CACHE_ENC, encrypted).apply()
         } catch (_: Exception) {}
     }
 

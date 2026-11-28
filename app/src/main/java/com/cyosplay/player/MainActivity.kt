@@ -1,43 +1,62 @@
 package com.cyosplay.player
 
 import android.Manifest
+import android.app.Activity
+import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
 import android.content.ComponentCallbacks2
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
+import android.graphics.Rect
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import android.view.WindowManager
-import android.app.Activity
-import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -109,6 +128,18 @@ open class MainActivity : FragmentActivity() {
             viewModel.onDeletePermissionDenied()
         }
     }
+
+    internal fun launchPendingDeleteIntentSender(sender: android.content.IntentSender): Boolean {
+        return try {
+            deleteVideoLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    internal val unifiedDeleteLauncher
+        get() = deleteVideoLauncher
 
     val videoDeleteController = com.cyos.player.CyosVideoDeleteController(
         activity = this,
@@ -201,32 +232,96 @@ open class MainActivity : FragmentActivity() {
         }
     }
 
+    private var videoSourceRectHint: Rect? = null
+    private var isPipReceiverRegistered: Boolean = false
+
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            val player = com.cyos.player.CyosPlayerHolder.currentPlayerOrNull() ?: return
+            when (action) {
+                ACTION_PIP_REWIND -> {
+                    val target = (player.currentPosition - 10_000L).coerceAtLeast(0L)
+                    player.seekTo(target)
+                }
+                ACTION_PIP_PLAY_PAUSE -> {
+                    if (player.isPlaying) {
+                        player.pause()
+                    } else {
+                        player.play()
+                    }
+                    viewModel.updateActivePlayerPipState(
+                        isPlaying = player.playWhenReady,
+                        width = viewModel.uiState.value.activeVideoWidth,
+                        height = viewModel.uiState.value.activeVideoHeight
+                    )
+                    refreshPictureInPictureParams()
+                }
+                ACTION_PIP_FORWARD -> {
+                    val dur = player.duration.takeIf { it > 0L } ?: Long.MAX_VALUE
+                    val target = (player.currentPosition + 10_000L).coerceAtMost(dur)
+                    player.seekTo(target)
+                }
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.cyosplay.player.util.CryptoSecurityManager.enforcePermanentNonDebugMode(this)
         enableEdgeToEdge()
 
-        // Stealth Playback Privacy: Prevent recent-apps screenshots & screen recording of what video is played
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
+        runCatching {
+            val filter = IntentFilter().apply {
+                addAction(ACTION_PIP_REWIND)
+                addAction(ACTION_PIP_PLAY_PAUSE)
+                addAction(ACTION_PIP_FORWARD)
+            }
+            ContextCompat.registerReceiver(
+                this,
+                pipActionReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            isPipReceiverRegistered = true
+        }
 
+        // Restrict FLAG_SECURE strictly to Stealth Playback and Private Vault sessions
+        // so normal video playback supports system screenshots and casting.
         handleIncomingVideoIntent(intent)
 
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
-            // Toggle FLAG_SECURE dynamically based on Stealth Playback or Private Vault session
-            LaunchedEffect(uiState.stealthPlaybackEnabled, uiState.currentNavTab, uiState.currentScreen) {
+            LaunchedEffect(
+                uiState.stealthPlaybackEnabled,
+                uiState.currentNavTab,
+                uiState.currentScreen,
+                uiState.miniPlayerVideo
+            ) {
+                val activePlayerVideo = (uiState.currentScreen as? Screen.Player)?.video
+                val isPlayingVaultVideo = VideoPlayerViewModel.isVaultVideoItem(activePlayerVideo) ||
+                    VideoPlayerViewModel.isVaultVideoItem(uiState.miniPlayerVideo)
                 val shouldSecureWindow = uiState.stealthPlaybackEnabled ||
                     uiState.currentNavTab == NavDestination.VAULT ||
-                    uiState.currentScreen is Screen.Player
+                    isPlayingVaultVideo
                 if (shouldSecureWindow) {
                     window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
+            }
+
+            // Proactively push Android 12+ seamless Auto-PiP & native RemoteAction transport controls
+            LaunchedEffect(
+                uiState.currentScreen,
+                uiState.isPlayerCurrentlyPlaying,
+                uiState.autoPipEnabled,
+                uiState.activeVideoWidth,
+                uiState.activeVideoHeight,
+                uiState.stealthPlaybackEnabled
+            ) {
+                refreshPictureInPictureParams()
             }
 
             // Request version-appropriate Media permissions gracefully on launch (Android 7 to Android 17 / API 24-37)
@@ -273,7 +368,98 @@ open class MainActivity : FragmentActivity() {
         val action = incomingIntent.action
         val dataUri = incomingIntent.data ?: incomingIntent.clipData?.getItemAt(0)?.uri
         if ((action == android.content.Intent.ACTION_VIEW || action == android.content.Intent.ACTION_SEND) && dataUri != null) {
+            // Reject internal cyosvault:// URIs from external intents to enforce Vault containment
+            if (com.cyos.player.VaultChunkedAesGcmDataSource.isVaultStreamUri(dataUri)) {
+                return
+            }
             viewModel.importAndPlayLocalVideoUri(dataUri, saveFolderInApp = false)
+        }
+    }
+
+    fun updateVideoSourceRectHint(rect: Rect) {
+        if (rect.width() <= 0 || rect.height() <= 0) return
+        if (videoSourceRectHint == rect) return
+        videoSourceRectHint = Rect(rect)
+        if (viewModel.uiState.value.currentScreen is Screen.Player) {
+            refreshPictureInPictureParams()
+        }
+    }
+
+    private fun buildPipRemoteActions(isPlaying: Boolean): List<RemoteAction> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return emptyList()
+        val piFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+
+        fun makePendingIntent(action: String, requestCode: Int): PendingIntent {
+            val intent = Intent(action).setPackage(packageName)
+            return PendingIntent.getBroadcast(this, requestCode, intent, piFlags)
+        }
+
+        val rewindAction = RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_rew),
+            "Rewind 10s",
+            "Rewind 10 seconds",
+            makePendingIntent(ACTION_PIP_REWIND, PIP_REQ_REWIND)
+        )
+        val playPauseAction = RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(
+                this,
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+            ),
+            if (isPlaying) "Pause" else "Play",
+            if (isPlaying) "Pause playback" else "Resume playback",
+            makePendingIntent(ACTION_PIP_PLAY_PAUSE, PIP_REQ_PLAY_PAUSE)
+        )
+        val forwardAction = RemoteAction(
+            android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_ff),
+            "Forward 10s",
+            "Forward 10 seconds",
+            makePendingIntent(ACTION_PIP_FORWARD, PIP_REQ_FORWARD)
+        )
+        return listOf(rewindAction, playPauseAction, forwardAction)
+    }
+
+    private fun buildPictureInPictureParams(
+        videoWidth: Int,
+        videoHeight: Int,
+        isPlaying: Boolean,
+        allowAutoEnter: Boolean
+    ): PictureInPictureParams {
+        val (num, den) = com.cyosplay.player.util.AndroidVersionCompatHelper
+            .clampPipAspectRatioRational(videoWidth, videoHeight)
+        val rational = Rational(num, den)
+        val builder = PictureInPictureParams.Builder()
+            .setAspectRatio(rational)
+            .setActions(buildPipRemoteActions(isPlaying))
+        videoSourceRectHint?.takeIf { it.width() > 0 && it.height() > 0 }?.let { rect ->
+            builder.setSourceRectHint(rect)
+        }
+        if (com.cyosplay.player.util.AndroidVersionCompatHelper.supportsSeamlessAutoPip(Build.VERSION.SDK_INT)) {
+            builder.setAutoEnterEnabled(allowAutoEnter)
+            builder.setSeamlessResizeEnabled(true)
+        }
+        return builder.build()
+    }
+
+    fun refreshPictureInPictureParams() {
+        if (!com.cyosplay.player.util.AndroidVersionCompatHelper.canEnterPictureInPicture(Build.VERSION.SDK_INT)) {
+            return
+        }
+        val state = viewModel.uiState.value
+        val activePlayerVideo = (state.currentScreen as? Screen.Player)?.video
+        val isVaultOrStealth = state.stealthPlaybackEnabled ||
+            VideoPlayerViewModel.isVaultVideoItem(activePlayerVideo)
+        val allowAutoEnter = state.currentScreen is Screen.Player &&
+            state.isPlayerCurrentlyPlaying &&
+            state.autoPipEnabled &&
+            !isVaultOrStealth
+        runCatching {
+            val params = buildPictureInPictureParams(
+                videoWidth = state.activeVideoWidth,
+                videoHeight = state.activeVideoHeight,
+                isPlaying = state.isPlayerCurrentlyPlaying,
+                allowAutoEnter = allowAutoEnter
+            )
+            setPictureInPictureParams(params)
         }
     }
 
@@ -286,17 +472,20 @@ open class MainActivity : FragmentActivity() {
             return false
         }
         return try {
-            val (num, den) = com.cyosplay.player.util.AndroidVersionCompatHelper
-                .clampPipAspectRatioRational(videoWidth, videoHeight)
-            val rational = Rational(num, den)
-            val builder = PictureInPictureParams.Builder()
-                .setAspectRatio(rational)
-            if (com.cyosplay.player.util.AndroidVersionCompatHelper.supportsSeamlessAutoPip(Build.VERSION.SDK_INT)) {
-                builder.setAutoEnterEnabled(viewModel.uiState.value.autoPipEnabled)
-                builder.setSeamlessResizeEnabled(true)
-            }
-            val entered = enterPictureInPictureMode(builder.build())
+            val state = viewModel.uiState.value
+            val activePlayerVideo = (state.currentScreen as? Screen.Player)?.video
+            val allowAuto = state.autoPipEnabled &&
+                !state.stealthPlaybackEnabled &&
+                !VideoPlayerViewModel.isVaultVideoItem(activePlayerVideo)
+            val params = buildPictureInPictureParams(
+                videoWidth = videoWidth,
+                videoHeight = videoHeight,
+                isPlaying = state.isPlayerCurrentlyPlaying,
+                allowAutoEnter = allowAuto
+            )
+            val entered = enterPictureInPictureMode(params)
             if (entered) {
+                com.cyos.player.CyosPlayerHolder.setPipActive(true)
                 viewModel.setInPipMode(true)
             }
             entered
@@ -307,8 +496,18 @@ open class MainActivity : FragmentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
+        // Android 12+ uses seamless setAutoEnterEnabled(true) pushed via setPictureInPictureParams
+        if (com.cyosplay.player.util.AndroidVersionCompatHelper.supportsSeamlessAutoPip(Build.VERSION.SDK_INT)) {
+            return
+        }
         val state = viewModel.uiState.value
-        if (state.currentScreen is Screen.Player && state.isPlayerCurrentlyPlaying && state.autoPipEnabled) {
+        val activePlayerVideo = (state.currentScreen as? Screen.Player)?.video
+        val isVaultOrStealth = state.stealthPlaybackEnabled || VideoPlayerViewModel.isVaultVideoItem(activePlayerVideo)
+        if (state.currentScreen is Screen.Player &&
+            state.isPlayerCurrentlyPlaying &&
+            state.autoPipEnabled &&
+            !isVaultOrStealth
+        ) {
             enterVideoPipMode(state.activeVideoWidth, state.activeVideoHeight)
         }
     }
@@ -318,12 +517,19 @@ open class MainActivity : FragmentActivity() {
         newConfig: Configuration
     ) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        com.cyos.player.CyosPlayerHolder.setPipActive(isInPictureInPictureMode)
         viewModel.setInPipMode(isInPictureInPictureMode)
+        refreshPictureInPictureParams()
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun onStart() {
         super.onStart()
         viewModel.startObservingMediaStoreVideos()
+        val pooledPlayer = com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+        if (pooledPlayer != null && !com.cyos.player.CyosPlaybackService.isServiceRunning) {
+            com.cyos.player.CyosMediaSessionController.attachToPlayer(applicationContext, pooledPlayer)
+        }
     }
 
     override fun onStop() {
@@ -333,6 +539,14 @@ open class MainActivity : FragmentActivity() {
         if (!inPip) {
             viewModel.onAppBackgrounded()
         }
+    }
+
+    override fun onDestroy() {
+        if (isPipReceiverRegistered) {
+            runCatching { unregisterReceiver(pipActionReceiver) }
+            isPipReceiverRegistered = false
+        }
+        super.onDestroy()
     }
 
     @Suppress("DEPRECATION")
@@ -349,6 +563,15 @@ open class MainActivity : FragmentActivity() {
         super.onLowMemory()
         MemoryManager.performEmergencyMemoryTrim(this)
     }
+
+    companion object {
+        const val ACTION_PIP_REWIND = "com.cyosplay.player.action.PIP_REWIND"
+        const val ACTION_PIP_PLAY_PAUSE = "com.cyosplay.player.action.PIP_PLAY_PAUSE"
+        const val ACTION_PIP_FORWARD = "com.cyosplay.player.action.PIP_FORWARD"
+        private const val PIP_REQ_REWIND = 1001
+        private const val PIP_REQ_PLAY_PAUSE = 1002
+        private const val PIP_REQ_FORWARD = 1003
+    }
 }
 
 class cyosplay : MainActivity()
@@ -361,7 +584,8 @@ fun CyosPlayRootApp(
     val context = androidx.compose.ui.platform.LocalContext.current
     val isFullScreenPlayer = uiState.currentScreen is Screen.Player
 
-    val mediaStoreDeleteLauncher = com.cyosplay.player.util.MediaStoreFileHelper.rememberMediaStoreDeleteLauncher(
+    val hostMainActivity = context as? MainActivity
+    val fallbackDeleteLauncher = com.cyosplay.player.util.MediaStoreFileHelper.rememberMediaStoreDeleteLauncher(
         onDeleteSuccess = {
             if (viewModel.uiState.value.pendingRecycleBinDeleteIds.isNotEmpty()) {
                 viewModel.onRecycleBinMediaStoreDeleteConfirmed()
@@ -373,6 +597,7 @@ fun CyosPlayRootApp(
             viewModel.onDeletePermissionDenied()
         }
     )
+    val activeDeleteLauncher = hostMainActivity?.unifiedDeleteLauncher ?: fallbackDeleteLauncher
 
     val composeMoveVideoPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -383,11 +608,15 @@ fun CyosPlayRootApp(
     LaunchedEffect(uiState.pendingDeleteIntentSender) {
         val pendingSender = uiState.pendingDeleteIntentSender
         if (pendingSender != null) {
-            try {
-                mediaStoreDeleteLauncher.launch(
-                    IntentSenderRequest.Builder(pendingSender).build()
-                )
-            } catch (_: Exception) {
+            val launched = hostMainActivity?.launchPendingDeleteIntentSender(pendingSender) ?: run {
+                try {
+                    fallbackDeleteLauncher.launch(IntentSenderRequest.Builder(pendingSender).build())
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (!launched) {
                 viewModel.onDeletePermissionDenied()
             }
         }
@@ -463,6 +692,16 @@ fun CyosPlayRootApp(
             ) {
                 when (val screen = uiState.currentScreen) {
                     is Screen.Home -> {
+                        val shouldHandleHomeBack = uiState.isSelectionModeActive ||
+                            uiState.searchQuery.isNotBlank() ||
+                            uiState.currentNavTab != NavDestination.FOLDERS
+                        BackHandler(enabled = shouldHandleHomeBack) {
+                            when {
+                                uiState.isSelectionModeActive -> viewModel.clearSelection()
+                                uiState.searchQuery.isNotBlank() -> viewModel.updateSearchQuery("")
+                                uiState.currentNavTab != NavDestination.FOLDERS -> viewModel.selectNavTab(NavDestination.FOLDERS)
+                            }
+                        }
                         when (uiState.currentNavTab) {
                             NavDestination.VIDEOS, NavDestination.FOLDERS -> {
                                 FolderListScreen(
@@ -504,7 +743,10 @@ fun CyosPlayRootApp(
                             video = screen.video,
                             playlistQueue = screen.playlistQueue,
                             uiState = uiState,
-                            viewModel = viewModel
+                            viewModel = viewModel,
+                            onVideoBoundsChanged = { rect ->
+                                hostMainActivity?.updateVideoSourceRectHint(rect)
+                            }
                         )
                     }
                     is Screen.RecycleBin -> {
@@ -612,7 +854,7 @@ fun CyosPlayRootApp(
                                 com.cyosplay.player.util.MediaStoreFileHelper.deleteMediaFiles(
                                     context = context,
                                     uris = targetUris,
-                                    intentSenderLauncher = mediaStoreDeleteLauncher,
+                                    intentSenderLauncher = activeDeleteLauncher,
                                     onDeleteSuccess = {
                                         viewModel.confirmDeleteVideos(true)
                                     },
@@ -645,6 +887,36 @@ fun CyosPlayRootApp(
                     )
                 }
 
+                // Non-blocking File/Crypto Busy Progress Pill
+                if (uiState.isFileOperationBusy && uiState.fileTransferProgress == null) {
+                    Surface(
+                        shape = RoundedCornerShape(24.dp),
+                        tonalElevation = 6.dp,
+                        shadowElevation = 6.dp,
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 16.dp, start = 24.dp, end = 24.dp)
+                            .testTag("file_operation_busy_indicator")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Text(
+                                text = uiState.fileOperationStatusText ?: "Processing…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
                 // Status Feedback Banner
                 uiState.statusBannerMessage?.let { msg ->
                     Snackbar(
@@ -664,46 +936,83 @@ fun CyosPlayRootApp(
             }
         }
 
-        // Item 5: Freely Draggable Floating Mini-Player Overlay + Quick Position Presets
+        // Item 5: Freely Draggable Floating Mini-Player Overlay dynamically clamped to viewport bounds
         if (!isFullScreenPlayer) {
             uiState.miniPlayerVideo?.let { miniVideo ->
                 val folderKey = miniVideo.folderPath.ifBlank { miniVideo.folderId }
-                val savedVol = viewModel.getPlayerVolumeForVideo(miniVideo.path, folderKey)
+                val savedVol = remember(
+                    miniVideo.path,
+                    folderKey,
+                    uiState.videoVolumeMap,
+                    uiState.folderVolumeMap,
+                    uiState.savedPlayerVolume
+                ) {
+                    VideoPlayerViewModel.lookupFloatSettingCaseInsensitive(uiState.videoVolumeMap, miniVideo.path)
+                        ?: VideoPlayerViewModel.lookupFloatSettingCaseInsensitive(uiState.folderVolumeMap, folderKey)
+                        ?: uiState.savedPlayerVolume
+                }
                 val bottomNavOffset = if (uiState.currentScreen == Screen.Home) 84.dp else 16.dp
-                MiniPlayerFloatingBar(
-                    video = miniVideo,
-                    isPlaying = uiState.isMiniPlayerPlaying,
-                    positionMs = uiState.miniPlayerPositionMs,
-                    durationMs = uiState.miniPlayerDurationMs,
-                    volumeFraction = savedVol,
-                    isMuted = uiState.isAudioMuted,
-                    sizeMode = uiState.miniPlayerSizeMode,
-                    positionPreset = uiState.miniPlayerPositionPreset,
-                    forceHardwareAccelerationHighBitrate = uiState.forceHardwareAccelerationHighBitrate,
-                    onTogglePlayPause = { viewModel.toggleMiniPlayerPlayPause() },
-                    onSkipDeltaMs = { delta -> viewModel.skipMiniPlayer(delta) },
-                    onSeekToMs = { pos -> viewModel.seekMiniPlayerTo(pos) },
-                    onProgressTick = { pos, dur -> viewModel.updateMiniPlayerProgress(pos, dur) },
-                    onToggleSizeMode = { viewModel.toggleMiniPlayerSizeMode() },
-                    onSelectPositionPreset = { preset -> viewModel.setMiniPlayerPositionPreset(preset) },
-                    onCyclePositionPreset = { viewModel.cycleMiniPlayerPositionPreset() },
-                    onDragOffsetDelta = { dx, dy ->
-                        viewModel.dragMiniPlayerByDelta(dx, dy)
-                    },
-                    onDragFinished = { viewModel.persistMiniPlayerOffset() },
-                    onResetPosition = { viewModel.resetMiniPlayerOffset() },
-                    onExpand = { viewModel.expandMiniPlayer() },
-                    onClose = { viewModel.closeMiniPlayer() },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = bottomNavOffset)
-                        .offset {
-                            androidx.compose.ui.unit.IntOffset(
-                                x = kotlin.math.round(uiState.miniPlayerOffsetX).toInt(),
-                                y = kotlin.math.round(uiState.miniPlayerOffsetY).toInt()
-                            )
-                        }
-                )
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val density = LocalDensity.current
+                    val containerWidthPx = with(density) { maxWidth.toPx() }
+                    val containerHeightPx = with(density) { maxHeight.toPx() }
+                    val approxBarWidthPx = with(density) {
+                        (if (uiState.miniPlayerSizeMode == com.cyosplay.player.ui.MiniPlayerSizeMode.MEDIUM) 340.dp else 320.dp).toPx()
+                    }
+                    val approxBarHeightPx = with(density) {
+                        (if (uiState.miniPlayerSizeMode == com.cyosplay.player.ui.MiniPlayerSizeMode.MEDIUM) 290.dp else 120.dp).toPx()
+                    }
+                    val bottomPaddingPx = with(density) { bottomNavOffset.toPx() }
+                    val topSafePaddingPx = with(density) { 40.dp.toPx() }
+                    val maxHalfX = ((containerWidthPx - approxBarWidthPx) / 2f).coerceAtLeast(0f)
+                    val maxUpY = (containerHeightPx - approxBarHeightPx - bottomPaddingPx - topSafePaddingPx).coerceAtLeast(0f)
+
+                    val (clampedX, clampedY) = if (uiState.miniPlayerPositionPreset != com.cyosplay.player.data.model.MiniPlayerPositionPreset.CUSTOM) {
+                        val (presetX, presetY) = uiState.miniPlayerPositionPreset.resolveOffsetPx(maxHalfX, maxUpY)
+                        presetX.coerceIn(-maxHalfX, maxHalfX) to presetY.coerceIn(-maxUpY, 0f)
+                    } else {
+                        uiState.miniPlayerOffsetX.coerceIn(-maxHalfX, maxHalfX) to uiState.miniPlayerOffsetY.coerceIn(-maxUpY, 0f)
+                    }
+
+                    MiniPlayerFloatingBar(
+                        video = miniVideo,
+                        isPlaying = uiState.isMiniPlayerPlaying,
+                        positionMs = uiState.miniPlayerPositionMs,
+                        durationMs = uiState.miniPlayerDurationMs,
+                        volumeFraction = savedVol,
+                        isMuted = uiState.isAudioMuted,
+                        sizeMode = uiState.miniPlayerSizeMode,
+                        positionPreset = uiState.miniPlayerPositionPreset,
+                        forceHardwareAccelerationHighBitrate = uiState.forceHardwareAccelerationHighBitrate,
+                        decoderEngineMode = uiState.decoderEngineMode,
+                        lowRamShieldEnabled = uiState.lowRamShieldEnabled,
+                        batterySaverModeEnabled = uiState.batterySaverModeEnabled,
+                        onTogglePlayPause = { viewModel.toggleMiniPlayerPlayPause() },
+                        onSkipDeltaMs = { delta -> viewModel.skipMiniPlayer(delta) },
+                        onSeekToMs = { pos -> viewModel.seekMiniPlayerTo(pos) },
+                        onProgressTick = { pos, dur -> viewModel.updateMiniPlayerProgress(pos, dur) },
+                        onToggleSizeMode = { viewModel.toggleMiniPlayerSizeMode() },
+                        onSelectPositionPreset = { preset -> viewModel.setMiniPlayerPositionPreset(preset) },
+                        onCyclePositionPreset = { viewModel.cycleMiniPlayerPositionPreset() },
+                        onDragOffsetDelta = { dx, dy ->
+                            viewModel.dragMiniPlayerByDelta(dx, dy, maxHalfX, maxUpY)
+                        },
+                        onDragFinished = { viewModel.persistMiniPlayerOffset() },
+                        onResetPosition = { viewModel.resetMiniPlayerOffset() },
+                        onExpand = { viewModel.expandMiniPlayer() },
+                        onClose = { viewModel.closeMiniPlayer() },
+                        onPlaybackStateSynced = { playing -> viewModel.syncMiniPlayerPlayingState(playing) },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = bottomNavOffset)
+                            .offset {
+                                androidx.compose.ui.unit.IntOffset(
+                                    x = kotlin.math.round(clampedX).toInt(),
+                                    y = kotlin.math.round(clampedY).toInt()
+                                )
+                            }
+                    )
+                }
             }
         }
 

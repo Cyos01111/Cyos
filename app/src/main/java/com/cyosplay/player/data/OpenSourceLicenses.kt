@@ -30,11 +30,6 @@ object OpenSourceLicenses {
             "Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an \"AS IS\" BASIS, " +
             "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied."
 
-    private const val FFMPEG_LGPL_2_1_NOTICE: String =
-        "This application uses software from the FFmpeg project (via Media3 FFmpeg decoder extensions) licensed under the GNU Lesser General Public License, " +
-            "version 2.1 or later (LGPL v2.1+). You may obtain a copy of the LGPL v2.1 license at https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html. " +
-            "FFmpeg is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
-
     val thirdPartyNotices: List<OpenSourceLicenseNotice> = listOf(
         OpenSourceLicenseNotice(
             id = "androidx_media3_exoplayer",
@@ -42,17 +37,26 @@ object OpenSourceLicenses {
             version = "1.5.1",
             licenseType = "Apache 2.0",
             copyright = "Copyright (C) The Android Open Source Project",
-            summary = "Hardware-accelerated video/audio playback, container extractors, and MediaSession support.",
+            summary = "Hardware-accelerated and software MediaCodec video/audio playback, container extractors, and MediaSession support.",
             licenseText = APACHE_2_NOTICE
         ),
         OpenSourceLicenseNotice(
-            id = "ffmpeg",
-            libraryName = "FFmpeg",
-            version = "LGPL v2.1+",
-            licenseType = "LGPL v2.1+",
-            copyright = "Copyright (c) The FFmpeg Developers",
-            summary = "Audio and video codec decoding support for legacy and high-bitrate media formats.",
-            licenseText = FFMPEG_LGPL_2_1_NOTICE
+            id = "androidx_compose_material3",
+            libraryName = "AndroidX Jetpack Compose & Material 3",
+            version = "Compose BOM",
+            licenseType = "Apache 2.0",
+            copyright = "Copyright (C) The Android Open Source Project",
+            summary = "Declarative UI toolkit, Material Design 3 components, and adaptive layouts.",
+            licenseText = APACHE_2_NOTICE
+        ),
+        OpenSourceLicenseNotice(
+            id = "androidx_security_biometric",
+            libraryName = "AndroidX Security Crypto & Biometric",
+            version = "AndroidX",
+            licenseType = "Apache 2.0",
+            copyright = "Copyright (C) The Android Open Source Project",
+            summary = "Hardware-backed AndroidKeyStore cryptography and BiometricPrompt authentication.",
+            licenseText = APACHE_2_NOTICE
         )
     )
 }

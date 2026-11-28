@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -35,6 +37,7 @@ import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Replay10
@@ -67,6 +70,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -313,6 +317,16 @@ fun HoldMediaOptionsBottomSheet(
                 testTag = "hold_row_recycle_bin",
                 onClick = onMoveToRecycleBinClick
             )
+            if (onExactDetailsClick != null) {
+                HoldSheetRowItem(
+                    icon = Icons.Default.Info,
+                    title = "Exact File & Codec Details",
+                    subtitle = "Inspect container, resolution, codec, bitrate & file path",
+                    tint = ElectricCyan,
+                    testTag = "hold_option_exact_details",
+                    onClick = onExactDetailsClick
+                )
+            }
             HoldSheetRowItem(
                 icon = Icons.Default.DeleteForever,
                 title = "Delete / Zero-Trace Shred",
@@ -1375,6 +1389,9 @@ fun MiniPlayerFloatingBar(
     sizeMode: MiniPlayerSizeMode = MiniPlayerSizeMode.COMPACT,
     positionPreset: com.cyosplay.player.data.model.MiniPlayerPositionPreset = com.cyosplay.player.data.model.MiniPlayerPositionPreset.BOTTOM_CENTER,
     forceHardwareAccelerationHighBitrate: Boolean = false,
+    decoderEngineMode: com.cyosplay.player.data.model.DecoderEngineMode = com.cyosplay.player.data.model.DecoderEngineMode.AUTO_HW_PLUS,
+    lowRamShieldEnabled: Boolean = false,
+    batterySaverModeEnabled: Boolean = false,
     onTogglePlayPause: () -> Unit,
     onSkipDeltaMs: (Long) -> Unit,
     onSeekToMs: (Long) -> Unit = {},
@@ -1387,11 +1404,14 @@ fun MiniPlayerFloatingBar(
     onResetPosition: () -> Unit = {},
     onExpand: () -> Unit,
     onClose: () -> Unit,
+    onPlaybackStateSynced: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val currentOnDragOffsetDelta by androidx.compose.runtime.rememberUpdatedState(onDragOffsetDelta)
     val currentOnDragFinished by androidx.compose.runtime.rememberUpdatedState(onDragFinished)
+    val latestOnPlaybackStateSynced by androidx.compose.runtime.rememberUpdatedState(onPlaybackStateSynced)
+    val latestIsPlaying by androidx.compose.runtime.rememberUpdatedState(isPlaying)
     val safeDuration = durationMs.coerceAtLeast(video.durationMs.coerceAtLeast(1000L))
     val safePosition = positionMs.coerceIn(0L, safeDuration)
     var isScrubbingMiniSeek by remember { mutableStateOf(false) }
@@ -1402,74 +1422,134 @@ fun MiniPlayerFloatingBar(
         (safePosition.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
     }
 
-    val miniPlayer = remember(video.uri, forceHardwareAccelerationHighBitrate) {
-        try {
-            val baseSelector = com.cyosplay.player.util.AudioBadgeFormatter.createMultiCodecSelector(
-                preferSoftwareDecoder = false,
-                forceHardwareForHighBitrate = forceHardwareAccelerationHighBitrate
-            )
-            // Compact 4MB buffer & 32KB allocator chunks with 15s back-buffer for fast instant seeking in Mini-Player
-            val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
-                .setAllocator(androidx.media3.exoplayer.upstream.DefaultAllocator(true, 32 * 1024))
-                .setBufferDurationsMs(10_000, 20_000, 600, 1_500)
-                .setTargetBufferBytes(4 * 1024 * 1024)
-                .setBackBuffer(15_000, true)
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
-            com.cyosplay.player.buildCyosExoPlayer(
-                context = context,
-                baseCodecSelector = baseSelector,
-                loadControl = loadControl
-            ).apply {
-                setMediaItem(androidx.media3.common.MediaItem.fromUri(video.uri))
-                prepare()
-                if (safePosition > 0L) {
-                    seekTo(safePosition)
-                }
-                volume = if (isMuted) 0f else volumeFraction.coerceIn(0f, 1f)
-                playWhenReady = isPlaying
+    val codecProfileKey = remember(
+        decoderEngineMode,
+        forceHardwareAccelerationHighBitrate,
+        lowRamShieldEnabled,
+        batterySaverModeEnabled
+    ) {
+        com.cyosplay.player.ui.VideoPlayerViewModel.buildCodecProfileKey(
+            decoderEngineMode = decoderEngineMode,
+            forceHardwareAccelerationHighBitrate = forceHardwareAccelerationHighBitrate,
+            lowRamShieldEnabled = lowRamShieldEnabled,
+            batterySaverModeEnabled = batterySaverModeEnabled
+        )
+    }
+
+    val miniPlayer = remember(context, codecProfileKey, video.uri) {
+        runCatching {
+            val livePlayer = com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+            if (livePlayer != null && com.cyos.player.CyosPlayerHolder.lastCodecProfileKey() == codecProfileKey) {
+                livePlayer
+            } else {
+                val (codecSelector, extMode) = com.cyosplay.player.ui.VideoPlayerViewModel
+                    .resolveCodecSelectorAndExtensionMode(
+                        decoderEngineMode = decoderEngineMode,
+                        forceHardwareAccelerationHighBitrate = forceHardwareAccelerationHighBitrate
+                    )
+                com.cyos.player.CyosPlayerHolder.getOrCreateSession(
+                    context = context,
+                    mediaCodecSelector = codecSelector,
+                    extensionRendererMode = extMode,
+                    codecProfileKey = codecProfileKey,
+                    subtitlesEnabledByUser = false,
+                    forceLowRamMode = lowRamShieldEnabled,
+                    batterySaverEnabled = batterySaverModeEnabled,
+                    isNetworkStream = com.cyos.player.CyosFastPlayer.isNetworkStreamUri(video.uri)
+                ).player
             }
-        } catch (_: Throwable) {
-            null
+        }.getOrNull()
+    }
+
+    LaunchedEffect(miniPlayer, video.uri, video.path) {
+        val player = miniPlayer ?: return@LaunchedEffect
+        val targetUri = video.uri
+        val currentUri = runCatching {
+            player.currentMediaItem?.localConfiguration?.uri?.toString()
+        }.getOrNull()
+        val isAlreadyLoaded = currentUri == targetUri.toString() &&
+            player.playbackState != androidx.media3.common.Player.STATE_IDLE
+        if (!isAlreadyLoaded) {
+            player.setMediaItem(androidx.media3.common.MediaItem.fromUri(targetUri))
+            player.prepare()
+            if (safePosition > 0L) {
+                player.seekTo(safePosition)
+            }
+        }
+        player.volume = if (isMuted) 0f else 1.0f
+        player.playWhenReady = isPlaying
+        if (isPlaying && !player.isPlaying) {
+            player.play()
+        } else if (!isPlaying && player.isPlaying) {
+            player.pause()
         }
     }
 
     LaunchedEffect(miniPlayer, isPlaying) {
-        miniPlayer?.playWhenReady = isPlaying
-    }
-
-    LaunchedEffect(miniPlayer, volumeFraction, isMuted) {
-        miniPlayer?.volume = if (isMuted) 0f else volumeFraction.coerceIn(0f, 1f)
-    }
-
-    LaunchedEffect(miniPlayer, positionMs) {
         val player = miniPlayer ?: return@LaunchedEffect
-        if (!isScrubbingMiniSeek) {
-            val diff = kotlin.math.abs(player.currentPosition - positionMs)
-            if (diff > 1500L) {
-                player.seekTo(positionMs.coerceAtLeast(0L))
-            }
+        player.playWhenReady = isPlaying
+        if (isPlaying) {
+            if (!player.isPlaying) player.play()
+        } else {
+            if (player.isPlaying) player.pause()
         }
     }
 
+    LaunchedEffect(miniPlayer, isMuted) {
+        // Use AudioManager STREAM_MUSIC as single volume control; ExoPlayer only handles mute (0f vs 1f)
+        miniPlayer?.volume = if (isMuted) 0f else 1.0f
+    }
+
+    val latestOnProgressTick by rememberUpdatedState(onProgressTick)
     LaunchedEffect(miniPlayer, isPlaying, isScrubbingMiniSeek) {
         val player = miniPlayer ?: return@LaunchedEffect
         while (isPlaying && !isScrubbingMiniSeek) {
             // 1200ms low-CPU / low-battery cadence while browsing library or settings
             kotlinx.coroutines.delay(1200L)
-            val curPos = player.currentPosition.coerceAtLeast(0L)
-            val curDur = player.duration.takeIf { it > 0L } ?: safeDuration
+            val curPos = runCatching { player.currentPosition.coerceAtLeast(0L) }.getOrDefault(0L)
+            val curDur = runCatching { player.duration.takeIf { it > 0L } }.getOrNull() ?: safeDuration
             if (curPos > 0L) {
-                onProgressTick(curPos, curDur)
+                latestOnProgressTick(curPos, curDur)
             }
         }
     }
 
     DisposableEffect(miniPlayer) {
+        com.cyos.player.CyosPlayerHolder.markPlayerAttached()
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onIsPlayingChanged(playingNow: Boolean) {
+                val player = miniPlayer ?: return
+                val state = player.playbackState
+                if (state == androidx.media3.common.Player.STATE_READY ||
+                    state == androidx.media3.common.Player.STATE_ENDED
+                ) {
+                    if (playingNow != latestIsPlaying) {
+                        latestOnPlaybackStateSynced(playingNow)
+                    }
+                }
+            }
+
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (!playWhenReady && latestIsPlaying) {
+                    latestOnPlaybackStateSynced(false)
+                } else if (playWhenReady && !latestIsPlaying) {
+                    latestOnPlaybackStateSynced(true)
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == androidx.media3.common.Player.STATE_ENDED) {
+                    latestOnPlaybackStateSynced(false)
+                    val curDur = runCatching { miniPlayer?.duration?.takeIf { it > 0L } }.getOrNull() ?: safeDuration
+                    latestOnProgressTick(curDur, curDur)
+                }
+            }
+        }
+        miniPlayer?.addListener(listener)
         onDispose {
-            try {
-                miniPlayer?.release()
-            } catch (_: Throwable) {}
+            miniPlayer?.removeListener(listener)
+            // Do NOT release the shared pooled CyosPlayerHolder instance here so expanding to fullscreen is instant and gapless.
+            com.cyos.player.CyosPlayerHolder.markPlayerDetached()
         }
     }
 
@@ -1477,6 +1557,12 @@ fun MiniPlayerFloatingBar(
         (scrubSliderFraction * safeDuration).toLong().coerceIn(0L, safeDuration)
     } else {
         safePosition
+    }
+
+    val boundedWidthModifier = if (sizeMode == MiniPlayerSizeMode.MEDIUM) {
+        Modifier.widthIn(min = 280.dp, max = 340.dp)
+    } else {
+        Modifier.widthIn(min = 260.dp, max = 320.dp)
     }
 
     Card(
@@ -1487,7 +1573,7 @@ fun MiniPlayerFloatingBar(
         border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
         elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
         modifier = modifier
-            .fillMaxWidth()
+            .then(boundedWidthModifier)
             .padding(horizontal = 8.dp, vertical = 4.dp)
             .pointerInput(Unit) {
                 detectDragGestures(
@@ -1502,20 +1588,10 @@ fun MiniPlayerFloatingBar(
             .testTag("mini_player_floating_bar")
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)) {
-            // Top Draggable Handle for Freely Dragging & Setting Any Position
+            // Top Handle for Resetting Mini-Player Position (parent Card handles dragging cleanly)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragEnd = { currentOnDragFinished() },
-                            onDragCancel = { currentOnDragFinished() },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                currentOnDragOffsetDelta(dragAmount.x, dragAmount.y)
-                            }
-                        )
-                    }
                     .clickable(onClick = onResetPosition)
                     .padding(vertical = 4.dp)
                     .testTag("mini_player_drag_handle"),
@@ -1589,7 +1665,11 @@ fun MiniPlayerFloatingBar(
 
                     // Close Mini Player
                     IconButton(
-                        onClick = onClose,
+                        onClick = {
+                            runCatching { miniPlayer?.pause() }
+                            com.cyos.player.CyosPlayerHolder.pauseAndDetachIfPooled()
+                            onClose()
+                        },
                         modifier = Modifier
                             .size(36.dp)
                             .testTag("mini_player_close_button")
@@ -1617,13 +1697,25 @@ fun MiniPlayerFloatingBar(
                     if (miniPlayer != null) {
                         androidx.compose.ui.viewinterop.AndroidView(
                             factory = { ctx ->
-                                androidx.media3.ui.PlayerView(ctx).apply {
+                                val texturePlayerView = runCatching {
+                                    android.view.LayoutInflater.from(ctx).inflate(
+                                        com.cyosplay.player.R.layout.view_mini_texture_player,
+                                        null,
+                                        false
+                                    ) as? androidx.media3.ui.PlayerView
+                                }.getOrNull() ?: androidx.media3.ui.PlayerView(ctx)
+                                texturePlayerView.apply {
                                     useController = false
                                     player = miniPlayer
                                 }
                             },
                             update = { view ->
-                                view.player = miniPlayer
+                                if (view.player !== miniPlayer) {
+                                    view.player = miniPlayer
+                                }
+                            },
+                            onRelease = { view ->
+                                view.player = null
                             },
                             modifier = Modifier.matchParentSize()
                         )
@@ -1717,6 +1809,52 @@ fun MiniPlayerFloatingBar(
                     )
                 }
 
+                // Quick Position Preset Selector Row (Viewport-Adaptive Dock Targets)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val quickPresets = remember {
+                        listOf(
+                            com.cyosplay.player.data.model.MiniPlayerPositionPreset.BOTTOM_LEFT,
+                            com.cyosplay.player.data.model.MiniPlayerPositionPreset.BOTTOM_CENTER,
+                            com.cyosplay.player.data.model.MiniPlayerPositionPreset.BOTTOM_RIGHT,
+                            com.cyosplay.player.data.model.MiniPlayerPositionPreset.TOP_LEFT,
+                            com.cyosplay.player.data.model.MiniPlayerPositionPreset.TOP_RIGHT
+                        )
+                    }
+                    quickPresets.forEach { preset ->
+                        val isSelected = positionPreset == preset
+                        Surface(
+                            color = if (isSelected) ElectricCyan.copy(alpha = 0.22f) else MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(
+                                width = 1.dp,
+                                color = if (isSelected) ElectricCyan else MaterialTheme.colorScheme.outlineVariant
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clickable { onSelectPositionPreset(preset) }
+                                .testTag("mini_player_preset_${preset.name.lowercase()}")
+                        ) {
+                            Text(
+                                text = preset.shortLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (isSelected) ElectricCyan else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Clip,
+                                modifier = Modifier
+                                    .padding(horizontal = 4.dp, vertical = 4.dp)
+                                    .wrapContentWidth(Alignment.CenterHorizontally)
+                            )
+                        }
+                    }
+                }
+
             } else {
                 // ================= COMPACT MINI-BAR MODE =================
                 Row(
@@ -1739,13 +1877,25 @@ fun MiniPlayerFloatingBar(
                         if (miniPlayer != null) {
                             androidx.compose.ui.viewinterop.AndroidView(
                                 factory = { ctx ->
-                                    androidx.media3.ui.PlayerView(ctx).apply {
+                                    val texturePlayerView = runCatching {
+                                        android.view.LayoutInflater.from(ctx).inflate(
+                                            com.cyosplay.player.R.layout.view_mini_texture_player,
+                                            null,
+                                            false
+                                        ) as? androidx.media3.ui.PlayerView
+                                    }.getOrNull() ?: androidx.media3.ui.PlayerView(ctx)
+                                    texturePlayerView.apply {
                                         useController = false
                                         player = miniPlayer
                                     }
                                 },
                                 update = { view ->
-                                    view.player = miniPlayer
+                                    if (view.player !== miniPlayer) {
+                                        view.player = miniPlayer
+                                    }
+                                },
+                                onRelease = { view ->
+                                    view.player = null
                                 },
                                 modifier = Modifier.matchParentSize()
                             )
@@ -1842,6 +1992,18 @@ fun MiniPlayerFloatingBar(
                     }
 
                     IconButton(
+                        onClick = onCyclePositionPreset,
+                        modifier = Modifier.size(34.dp).testTag("mini_player_position_preset_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.OpenWith,
+                            contentDescription = "Cycle mini-player dock position (${positionPreset.label})",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
                         onClick = onToggleSizeMode,
                         modifier = Modifier.size(34.dp).testTag("mini_player_size_toggle_button")
                     ) {
@@ -1866,7 +2028,11 @@ fun MiniPlayerFloatingBar(
                     }
 
                     IconButton(
-                        onClick = onClose,
+                        onClick = {
+                            runCatching { miniPlayer?.pause() }
+                            com.cyos.player.CyosPlayerHolder.pauseAndDetachIfPooled()
+                            onClose()
+                        },
                         modifier = Modifier.size(34.dp).testTag("mini_player_close_button")
                     ) {
                         Icon(
@@ -1902,16 +2068,6 @@ fun MiniPlayerFloatingBar(
                     .height(20.dp)
                     .padding(horizontal = 6.dp)
                     .testTag("mini_player_seek_slider")
-            )
-
-            LinearProgressIndicator(
-                progress = { progressFraction },
-                color = ElectricCyan,
-                trackColor = MaterialTheme.colorScheme.surface,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp)
-                    .testTag("mini_player_progress_bar")
             )
         }
     }

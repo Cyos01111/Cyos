@@ -1,6 +1,7 @@
 package com.cyosplay.player.ui.screens
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -29,6 +30,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -39,6 +41,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import com.cyosplay.player.util.SubtitleParser
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -369,6 +372,8 @@ fun SubtitleTracksAndSyncDialog(
     syncOffsetMs: Long,
     onAdjustOffsetMs: (Long) -> Unit,
     onResetOffset: () -> Unit,
+    selectedSubtitleEncoding: String = "AUTO",
+    onSelectSubtitleEncoding: (String) -> Unit = {},
     onLoadExternalSrt: () -> Unit,
     onOpenSubtitleStudio: () -> Unit,
     onDismiss: () -> Unit
@@ -528,6 +533,40 @@ fun SubtitleTracksAndSyncDialog(
                     }
                     OutlinedButton(onClick = onOpenSubtitleStudio, modifier = Modifier.weight(1f)) {
                         Text("Style Studio")
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Text Encoding (Fix Non-UTF-8 Subtitles)",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = ElectricCyan
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .testTag("subtitle_encoding_picker_row"),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    SubtitleParser.SUPPORTED_SUBTITLE_ENCODINGS.forEach { option ->
+                        val isSelected = selectedSubtitleEncoding.equals(option.id, ignoreCase = true)
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { onSelectSubtitleEncoding(option.id) },
+                            label = {
+                                Text(
+                                    text = option.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1
+                                )
+                            },
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("subtitle_encoding_chip_${option.id.lowercase().replace('-', '_')}")
+                        )
                     }
                 }
 

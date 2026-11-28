@@ -12,8 +12,8 @@ android {
         applicationId = "com.cyosplay.player"
         minSdk = 24
         targetSdk = 36
-        versionCode = 48
-        versionName = "1.08rv6"
+        versionCode = 51
+        versionName = "1.08rv9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MAJOR_CAPABILITY_ID", "\"cyos play\"")
@@ -135,9 +135,10 @@ dependencies {
     implementation(libs.androidx.media3.ui)
     implementation(libs.androidx.media3.common)
     implementation(libs.androidx.media3.session)
-    implementation(libs.coil.compose)
+    implementation(libs.androidx.media3.effect)
+    // implementation(libs.coil.compose) // Unused: thumbnail decoding uses ContentResolver.loadThumbnail + Semaphore(2)
     implementation(libs.androidx.biometric)
-    implementation(libs.androidx.security.crypto)
+    // implementation(libs.androidx.security.crypto) // Unused: app uses native AndroidKeyStore AES-256-GCM in CryptoSecurityManager
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.appcompat)
     implementation(libs.play.services.oss.licenses)
@@ -154,109 +155,19 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 }
 
-afterEvaluate {
-    listOf(
-        "CyosPlay-v1.08rv4-release-signed-apk.zip",
-        "CyosPlay-v1.08rv4-release-signed.apk",
-        "cyosplay-1.08rv4-release.apk",
-        "CyosPlay-v1.08rv3-release-signed-apk.zip",
-        "CyosPlay-v1.08rv3-release-signed.apk",
-        "cyosplay-1.08rv3-release.apk",
-        "CyosPlay-v1.08rv2-release-signed-apk.zip",
-        "CyosPlay-v1.08rv2-release-signed.apk",
-        "cyosplay-1.08rv2-release.apk",
-        "CyosPlay-v1.08rv-release-signed-apk.zip",
-        "CyosPlay-v1.08rv-release-signed.apk",
-        "cyosplay-1.08rv-release.apk",
-        "CyosPlay-v1.07rv8a-release-signed-apk.zip",
-        "CyosPlay-v1.07rv8a-release-signed.apk",
-        "cyosplay-1.07rv8a-release.apk",
-        "CyosPlay-v1.07rv7b-release-signed-apk.zip",
-        "CyosPlay-v1.07rv7b-release-signed.apk",
-        "cyosplay-1.07rv7b-release.apk",
-        "CyosPlay-v1.07rv7a-release-signed-apk.zip",
-        "CyosPlay-v1.07rv7a-release-signed.apk",
-        "cyosplay-1.07rv7a-release.apk",
-        "CyosPlay-v1.07rv8-release-signed-apk.zip",
-        "CyosPlay-v1.07rv8-release-signed.apk",
-        "cyosplay-1.07rv8-release.apk",
-        "CyosPlay-v1.07rv7-release-signed-apk.zip",
-        "CyosPlay-v1.07rv7-release-signed.apk",
-        "cyosplay-1.07rv7-release.apk",
-        "CyosPlay-v1.07rv6-release-signed-apk.zip",
-        "CyosPlay-v1.07rv6-release-signed.apk",
-        "cyosplay-1.07rv6-release.apk",
-        "CyosPlay-v1.07rv5-release-signed.apk",
-        "cyosplay-1.07rv5-release.apk",
-        "CyosPlay-v1.07rv4-release-signed.apk",
-        "cyosplay-1.07rv4-release.apk",
-        "CyosPlay-v1.07rv3-release-signed.apk",
-        "cyosplay-1.07rv3-release.apk",
-        "CyosPlay-v1.07rv2-release-signed.apk",
-        "cyosplay-1.07rv2-release.apk",
-        "CyosPlay-v1.07rv-release-signed.apk",
-        "cyosplay-1.07rv-release.apk",
-        "CyosPlay-v1.06rv18-release-signed.apk",
-        "cyosplay-1.06rv18-release.apk",
-        "CyosPlay-v1.06rv17-release-signed.apk",
-        "cyosplay-1.06rv17-release.apk",
-        "CyosPlay-v1.06rv16-release-signed.apk",
-        "cyosplay-1.06rv16-release.apk",
-        "CyosPlay-v1.06rv15-release-signed.apk",
-        "cyosplay-1.06rv15-release.apk",
-        "CyosPlay-v1.06rv14-release-signed.apk",
-        "cyosplay-1.06rv14-release.apk",
-        "app/cyosplay_release.jks",
-        "CyosPlay-v1.06rv13-release-signed.apk",
-        "cyosplay-1.06rv13-release.apk",
-        "CyosPlay-v1.06rv12-release-signed.apk",
-        "cyosplay-1.06rv12-release.apk",
-        "CyosPlay-v1.06rv11-release-signed.apk",
-        "cyosplay-1.06rv11-release.apk",
-        "CyosPlay-v1.06rv10-release-signed.apk",
-        "cyosplay-1.06rv10-release.apk",
-        "CyosPlay-v1.06rv9-release-signed.apk",
-        "cyosplay-1.06rv9-release.apk",
-        "CyosPlay-v1.06rv8-release-signed.apk",
-        "cyosplay-1.06rv8-release.apk",
-        "CyosPlay-v1.06rv7-release-signed.apk",
-        "cyosplay-1.06rv7-release.apk",
-        "CyosPlay-v1.06rv6-release-signed.apk",
-        "cyosplay-1.06rv6-release.apk",
-        "CyosPlay-v1.06rv5-release-signed.apk",
-        "cyosplay-1.06rv5-release.apk",
-        "CyosPlay-v1.06rv4-release-signed.apk",
-        "cyosplay-1.06rv4-release.apk",
-        "CyosPlay-v1.06rv3-release-signed.apk",
-        "cyosplay-1.06rv3-release.apk",
-        "CyosPlay-v1.06rv2-release-signed.apk",
-        "cyosplay-1.06rv2-release.apk",
-        "CyosPlay-v1.06rv-release-signed.apk",
-        "cyosplay-1.06rv-release.apk",
-        "CyosPlay-v1.05rv4-release-signed.apk",
-        "cyosplay-1.05rv4-release.apk",
-        "CyosPlay-v1.05rv3-release-signed.apk",
-        "cyosplay-1.05rv3-release.apk",
-        "CyosPlay-v1.05rv2-release-signed.apk",
-        "cyosplay-1.05rv2-release.apk",
-        "CyosPlay-v1.05rv-release-signed.apk",
-        "cyosplay-1.05rv-release.apk",
-        "CyosPlay-v1.04rv3-release-signed.apk",
-        "cyosplay-1.04rv3-release.apk",
-        "CyosPlay-v1.04rv2-release-signed.apk",
-        "cyosplay-1.04rv2-release.apk",
-        "CyosPlay-v1.04rv-release-signed.apk",
-        "cyosplay-1.04rv-release.apk",
-        "CyosPlay-v1.04mfr-release-signed.apk",
-        "cyosplay-1.04mfr-release.apk",
-        "CyosPlay-v1.03-release-signed.apk",
-        "cyosplay-1.03-release.apk",
-        "cyosplay-1.02c-release.apk"
-    ).forEach { oldApk ->
-        val file = rootProject.file(oldApk)
-        if (file.exists()) {
-            file.delete()
-        }
+tasks.register("cleanLegacyRootApks") {
+    group = "cleanup"
+    description = "Deletes legacy root-directory release APK/ZIP artifacts from previous versions."
+    val rootDirRef = rootProject.projectDir
+    doLast {
+        rootDirRef.listFiles()
+            ?.filter { file ->
+                file.isFile && (
+                    file.name.endsWith(".apk", ignoreCase = true) ||
+                        file.name.endsWith("-release-signed-apk.zip", ignoreCase = true)
+                    )
+            }
+            ?.forEach { it.delete() }
     }
 }
 

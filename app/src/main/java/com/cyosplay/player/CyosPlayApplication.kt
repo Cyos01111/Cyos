@@ -41,7 +41,7 @@ class CyosPlayApplication : Application() {
 
     override fun onLowMemory() {
         super.onLowMemory()
-        CyosPlayerHolder.release()
+        CyosPlayerHolder.releaseIfIdle()
         MemoryManager.performEmergencyMemoryTrim(this)
     }
 }

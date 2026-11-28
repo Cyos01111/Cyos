@@ -194,15 +194,23 @@ enum class MiniPlayerPositionPreset(
     val label: String,
     val shortLabel: String,
     val defaultOffsetX: Float,
-    val defaultOffsetY: Float
+    val defaultOffsetY: Float,
+    val fractionX: Float = 0f,
+    val fractionY: Float = 0f
 ) {
-    BOTTOM_CENTER("Bottom Center", "Bottom", 0f, 0f),
-    BOTTOM_LEFT("Bottom Left", "B-Left", -220f, 0f),
-    BOTTOM_RIGHT("Bottom Right", "B-Right", 220f, 0f),
-    CENTER("Center Screen", "Center", 0f, -420f),
-    TOP_LEFT("Top Left", "T-Left", -220f, -820f),
-    TOP_RIGHT("Top Right", "T-Right", 220f, -820f),
-    CUSTOM("Custom Free Position", "Custom", 0f, 0f)
+    BOTTOM_CENTER("Bottom Center", "Bottom", 0f, 0f, 0f, 0f),
+    BOTTOM_LEFT("Bottom Left", "B-Left", -220f, 0f, -1f, 0f),
+    BOTTOM_RIGHT("Bottom Right", "B-Right", 220f, 0f, 1f, 0f),
+    CENTER("Center Screen", "Center", 0f, -420f, 0f, -0.5f),
+    TOP_LEFT("Top Left", "T-Left", -220f, -820f, -1f, -1f),
+    TOP_RIGHT("Top Right", "T-Right", 220f, -820f, 1f, -1f),
+    CUSTOM("Custom Free Position", "Custom", 0f, 0f, 0f, 0f);
+
+    fun resolveOffsetPx(maxHalfX: Float, maxUpY: Float): Pair<Float, Float> {
+        val safeHalfX = maxHalfX.coerceAtLeast(0f)
+        val safeUpY = maxUpY.coerceAtLeast(0f)
+        return (fractionX * safeHalfX) to (fractionY * safeUpY)
+    }
 }
 
 enum class SmartEnhancementMode(
@@ -627,9 +635,9 @@ data class VideoItem(
         get() {
             val lower = displayName.lowercase(java.util.Locale.US)
             return if (formatBadge in setOf("MKV", "WEBM", "MK3D", "MKS") || lower.contains("x26.mkv") || lower.contains("matroska")) {
-                "Matroska (.mkv) (matroska,webm ,mkvmerge v56.1.0) • Matroska/WebM • Lavf62.3.100 • Lavf60.3.100 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • libebml v1.4.7 + libmatroska v1.7.2 • Encoding SW • Encodina SW • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 • Video Codec MPEG-4 part 2 • ASP • MPEG-4 Part 2 (XVID) (Advanced Simple Profile with packed B-frames) • Video Codec: H.264 / AVC (avc1) • libx264, yuv420p, -movflags +faststart • Profile: Main Profile (avc1.4d401e) or High Profile (avc1.64001e) at Level 3.0 / 3.1 • Chroma Subsampling / Bit Depth: YUV 4:2:0, 8-bit • HE-AAC • AAC • LC • AAC LC (44.1 kHz, Stereo) • Profile: AAC-LC (Low Complexity, mp4a.40.2) • 44100 HZ (8,000 Hz – 384,000 Hz) • Web/Stream Frame Dimensions: 360p (640×360) / SD (704×396, 536×396 or 640×480 depending on platform transcode) • FFmpeg extension • MediaInfo / FFprobe"
+                "Matroska (.mkv / .webm) • AndroidX Media3 Extractor • Android MediaCodec (HW/SW) • $videoCodecHint • $audioCodecHint"
             } else {
-                "$formatBadge • Matroska (.mkv) (matroska,webm ,mkvmerge v56.1.0) • Lavf62.3.100 • Lavf60.3.100 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • Encoding SW • Encodina SW • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 • Video Codec MPEG-4 part 2 • ASP • MPEG-4 Part 2 (XVID) (Advanced Simple Profile with packed B-frames) • Video Codec: H.264 / AVC (avc1) • libx264, yuv420p, -movflags +faststart • Profile: Main Profile (avc1.4d401e) or High Profile (avc1.64001e) at Level 3.0 / 3.1 • Chroma Subsampling / Bit Depth: YUV 4:2:0, 8-bit • HE-AAC • AAC • LC • AAC LC (44.1 kHz, Stereo) • Profile: AAC-LC (Low Complexity, mp4a.40.2) • 44100 HZ (8,000 Hz – 384,000 Hz) • Web/Stream Frame Dimensions: 360p (640×360) / SD (704×396, 536×396 or 640×480 depending on platform transcode) • FFmpeg extension • MediaInfo / FFprobe"
+                "$formatBadge Container • AndroidX Media3 Extractor • Android MediaCodec (HW/SW) • $videoCodecHint • $audioCodecHint"
             }
         }
 
@@ -669,11 +677,11 @@ data class VideoProperties(
     val dateModifiedFormatted: String,
     val sha256FingerprintPrefix: String,
     val encryptionProtectionBadge: String = "AES-256-GCM + Master Password Locked",
-    val matroskaMuxingEngine: String = "Matroska (.mkv) (matroska,webm ,mkvmerge v56.1.0) • Lavf62.3.100 • Lavf60.3.100 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • libebml v1.4.7 + libmatroska v1.7.2",
-    val ffmpegCodecDescriptor: String = "DEV.LS h264 H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (avc1.4d401e / avc1.64001e • libx264, yuv420p, -movflags +faststart) / MPEG-4 Part 2 (XVID 0x44495658) (Advanced Simple Profile Level 5 with packed B-frames) • FFmpeg extension",
-    val softwareEncodingDecodingEngine: String = "MediaCodec + FFmpeg extension (Lavf62.3.100 • libavcodec 60.31.102 • libx264 / libx265 / libaom-av1 / libxvid • MediaInfo / FFprobe)",
+    val matroskaMuxingEngine: String = "AndroidX Media3 Matroska/MP4 Container Extractor",
+    val ffmpegCodecDescriptor: String = "Android MediaCodec Hardware/Software Pipeline (H.264/AVC, HEVC, VP9, AV1, MPEG-4 ASP/Xvid)",
+    val softwareEncodingDecodingEngine: String = "AndroidX Media3 + Android MediaCodec (HW priority with SW fallback)",
     val supportedResolutionsSummary: String = "All Resolutions Supported (144p → 495×396 → 512×384 → 536×396 → 640×360 → 640×480 → 704×396 → 720×404 → 720×540 → 720×576 → 720p → 1920×800 → 1080p → 2K → 4K UHD → 8K UHD)",
-    val ffmpegLibraryVersionsSummary: String = "Lavf62.3.100 • Lavf60.3.100 • libavutil 58.29.100 • libavcodec 60.31.102 • libavformat 62.3.100 • libswscale 7.5.100 • libswresample 4.12.100 • libebml v1.4.2 + libmatroska v1.6.4 • libebml v14.2 + libmatroska v1.6.4 • mkvmerge v56.1.0 ('My Friend') 64-bit • FFmpeg extension",
+    val ffmpegLibraryVersionsSummary: String = "AndroidX Media3 ExoPlayer 1.5.1 • Android MediaCodec HW/SW Decoders",
     val encryptedDatacodeCipherToken: String = "",
     val fullSha256Checksum: String = "",
     val lastPlaybackPositionMs: Long = 0L,

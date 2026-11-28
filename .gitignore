@@ -1,8 +1,19 @@
-# Environment & local secrets (NEVER commit real keystore passwords or secrets to GitHub)
+# Environment, credential properties & local secrets (NEVER commit real or encrypted passwords to GitHub)
 .env
-.env.local
-.env.*.local
+.env.*
 !.env.example
+keystore.properties
+signing.properties
+secrets.properties
+*.secret
+*.secrets
+*.credentials
+
+# Encrypted envelopes, password blobs & signature keys (NEVER commit to GitHub)
+*.enc
+*.gpg
+*.asc
+release-integrity.enc
 
 # Release signing keystores & private keys (keep template debug keystore only)
 *.keystore
@@ -16,13 +27,11 @@ cyosplay-release.keystore
 !debug.keystore
 !debug.keystore.base64
 
-# Exported & built Android packages and release integrity artifacts (never publish to GitHub)
-export/
-*.apk
+# Built Android packages (build/app/build/.build-outputs remain ignored; export/ visible for local download)
 *.aab
 *.ap_
 *.dex
-release-integrity.enc
+*release-signed*.zip
 .build-outputs/
 
 # Gradle & IDE build caches

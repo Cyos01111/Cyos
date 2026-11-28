@@ -44,6 +44,19 @@ class ExampleRobolectricTest {
 
     private val context: Application = ApplicationProvider.getApplicationContext()
 
+    private fun awaitViewModelFileOp(viewModel: VideoPlayerViewModel, timeoutMs: Long = 5_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            if (!viewModel.uiState.value.isFileOperationBusy) {
+                shadowOf(Looper.getMainLooper()).idle()
+                return
+            }
+            Thread.sleep(15L)
+        }
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
     @Test
     fun deviceKeystoreEncryption_encryptsDataAndAutoRotatesOnCrackAttempt() {
         assertTrue(CryptoSecurityManager.verifyDeviceKeystoreIntegrity(context))
@@ -63,10 +76,12 @@ class ExampleRobolectricTest {
 
         val initialRotations = CryptoSecurityManager.getAutoRotationCount(context)
 
-        // Simulate 3 crack attempts -> should automatically generate a new dynamic key & re-encrypt all stores
-        viewModel.unlockVaultWithPin("000000")
-        viewModel.unlockVaultWithPin("111111")
-        viewModel.unlockVaultWithPin("999999")
+        // Simulate 3 crack attempts -> should automatically generate a new dynamic key & re-encrypt all stores off the main thread
+        kotlinx.coroutines.runBlocking {
+            viewModel.unlockVaultWithPinSuspend("000000")
+            viewModel.unlockVaultWithPinSuspend("111111")
+            viewModel.unlockVaultWithPinSuspend("999999")
+        }
 
         val afterCrackRotations = CryptoSecurityManager.getAutoRotationCount(context)
         assertTrue("Expected automatic key rotation on crack attempts", afterCrackRotations > initialRotations)
@@ -74,7 +89,9 @@ class ExampleRobolectricTest {
 
         // Clear lockout timer to verify that the legitimate 6-digit PIN unlocks the vault after automatic re-encryption
         CryptoSecurityManager.resetCrackAttempts(context)
-        viewModel.unlockVaultWithPin("258046")
+        kotlinx.coroutines.runBlocking {
+            viewModel.unlockVaultWithPinSuspend("258046")
+        }
         assertEquals(0, CryptoSecurityManager.getFailedCrackAttempts(context))
     }
 
@@ -129,6 +146,7 @@ class ExampleRobolectricTest {
             targetPath = downloadDir.absolutePath
         )
         viewModel.executeCopyOrMoveToDestination(downloadDest)
+        awaitViewModelFileOp(viewModel)
         assertEquals(2, viewModel.uiState.value.allVideos.size)
 
         // 3. Hold and Move video to SD Card Movies folder
@@ -143,6 +161,7 @@ class ExampleRobolectricTest {
             isRemovableSd = true
         )
         viewModel.executeCopyOrMoveToDestination(sdDest)
+        awaitViewModelFileOp(viewModel)
         assertTrue(viewModel.uiState.value.allVideos.any { it.folderPath == sdMoviesDir.absolutePath && it.title == copiedVideo.title })
 
         // 4. Hold and Delete video (executes immediate deletion in v1.06rv9 without dialog/permission prompt)
@@ -157,7 +176,7 @@ class ExampleRobolectricTest {
     @Test
     fun playerRotationLockAudioSelectionAndLowRamControls_workCorrectly() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
 
         viewModel.setLowRamShieldEnabled(true)
         viewModel.setBatterySaverModeEnabled(true)
@@ -243,6 +262,7 @@ class ExampleRobolectricTest {
             targetPath = "/storage/emulated/0/MyCustomFolder/Cinema8K"
         )
         viewModel.executeCopyOrMoveToDestination(customAnywhereDest)
+        awaitViewModelFileOp(viewModel)
         assertTrue(viewModel.uiState.value.allVideos.any { it.folderPath == "/storage/emulated/0/MyCustomFolder/Cinema8K" })
 
         // Verify strict APK isolation blocks any access to other apps' /Android/data, /Android/obb, /Android/media
@@ -326,6 +346,7 @@ class ExampleRobolectricTest {
 
         // Directly paste into another folder (/storage/sdcard1/Movies)
         viewModel.pasteClipboardIntoFolder("/storage/sdcard1/Movies", "SD Card Movies")
+        awaitViewModelFileOp(viewModel)
         assertFalse(
             "Moved video must no longer appear in source folder",
             viewModel.uiState.value.allVideos.any { it.folderPath == "/storage/emulated/0/Download" && it.title == "Action Clip 4K" }
@@ -455,8 +476,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify CyosPlay 1.07rv8 branding & simplified description
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 2. Verify Debug Mode and Zero-Knowledge technical text are hidden silently
         CryptoSecurityManager.enforcePermanentNonDebugMode(context)
@@ -623,14 +644,31 @@ class ExampleRobolectricTest {
         val diskBytes = encryptedDiskFile.readBytes()
         assertFalse(String(diskBytes).contains("ULTRA_SECRET_MEDIA_CONTENT_8K"))
 
-        // Verify successful ephemeral playback item preparation via streaming decryption pipeline
+        // Verify zero-plaintext streaming playback item preparation (cyosvault:// on-demand RAM decryption)
         val ephemeralItem = vaultManager.prepareEphemeralPlaybackItem(vaultEntry)
         assertNotNull(ephemeralItem)
-        val decryptedFile = File(ephemeralItem!!.path)
-        assertTrue(decryptedFile.exists())
-        assertEquals("ULTRA_SECRET_MEDIA_CONTENT_8K", String(decryptedFile.readBytes(), Charsets.UTF_8))
+        assertEquals(com.cyos.player.VaultChunkedAesGcmDataSource.SCHEME, ephemeralItem!!.uri.scheme)
+        val ephemeralCacheDir = File(context.cacheDir, "vault_ephemeral_play")
+        assertTrue(
+            "Zero plaintext must be written to vault_ephemeral_play for V3 streaming playback",
+            ephemeralCacheDir.listFiles().isNullOrEmpty()
+        )
+        val streamDs = com.cyos.player.VaultChunkedAesGcmDataSource(context)
+        try {
+            val totalLen = streamDs.open(androidx.media3.datasource.DataSpec(ephemeralItem.uri))
+            val streamedBuf = ByteArray(totalLen.toInt())
+            var off = 0
+            while (off < streamedBuf.size) {
+                val n = streamDs.read(streamedBuf, off, streamedBuf.size - off)
+                if (n <= 0) break
+                off += n
+            }
+            assertEquals("ULTRA_SECRET_MEDIA_CONTENT_8K", String(streamedBuf, 0, off, Charsets.UTF_8))
+        } finally {
+            streamDs.close()
+        }
         vaultManager.wipeEphemeralPlaybackCache()
-        assertFalse(decryptedFile.exists())
+        assertTrue(ephemeralCacheDir.listFiles().isNullOrEmpty())
     }
 
     @Test
@@ -813,8 +851,11 @@ class ExampleRobolectricTest {
             video = sampleRemuxVideo,
             positionMs = 12_500L
         )
-        assertTrue("Screenshot capture must succeed via MediaStore or dedicated directory fallback", captureResult.success)
-        assertTrue(captureResult.displayPath.contains("CyosPlay_Screenshots"))
+        assertFalse(
+            "Screenshot capture must fail cleanly for an unreadable/missing file instead of writing a fake placeholder image",
+            captureResult.success
+        )
+        assertTrue(captureResult.message.isNotBlank())
     }
 
     @Test
@@ -1183,8 +1224,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify APK Version 1.06rv8
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 2. Verify Last Playback Position Saving, Auto-Resume on Reopen, and Start Over Reset
         viewModel.setStealthPlaybackEnabled(false)
@@ -1361,8 +1402,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.06rv8 & default mobile system font mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertEquals(com.cyosplay.player.data.model.AppFontMode.SYSTEM_DEFAULT, viewModel.uiState.value.fontMode)
 
         // 2. Verify Subtitles and Smart Enhanced Video do NOT automatically turn ON until user enables them
@@ -1585,8 +1626,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv2_matroskaWebm495x396EncodingSwAspAacLc_perVideoAndFolderBrightnessVolume_vaultAutoLock10s_andMediaStoreHelper() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 1. Verify 495x396 and 1920x800 Matroska/WebM, Encoding SW, libebml v14.2 + libmatroska v1.6.4, Video Codec MPEG-4 part 2, ASP, AAC, LC, and 44100 HZ
         val matroska495x396 = VideoItem(
@@ -1607,27 +1648,25 @@ class ExampleRobolectricTest {
         )
         assertEquals("495×396", matroska495x396.resolutionBadge)
         assertEquals("5:4", matroska495x396.aspectRatioLabel)
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("libebml v14.2 + libmatroska v1.6.4"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("Encoding SW"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("Video Codec MPEG-4 part 2"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("ASP"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("AAC"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("LC"))
-        assertTrue(matroska495x396.matroskaEbmlBadge.contains("44100 HZ"))
+        assertTrue(matroska495x396.matroskaEbmlBadge.contains("AndroidX Media3 Extractor"))
+        assertTrue(matroska495x396.matroskaEbmlBadge.contains("Android MediaCodec"))
+        assertTrue(matroska495x396.matroskaEbmlBadge.contains("Matroska"))
+        assertFalse(
+            "Badge must not fabricate unbundled libebml/libmatroska version strings",
+            matroska495x396.matroskaEbmlBadge.contains("libebml v14.2")
+        )
         assertTrue(
             AudioBadgeFormatter.formatVideoCodecBadge("video/mp4v-es", 495, 396)
-                .contains("Video Codec MPEG-4 part 2 / ASP / LC")
+                .contains("MPEG-4")
         )
-        assertTrue(
-            AudioBadgeFormatter.formatAudioCodecBadge("audio/mp4a-latm", 2, "AAC-LC", 44100)
-                .contains("44100 HZ")
-        )
+        val formattedAacBadge = AudioBadgeFormatter.formatAudioCodecBadge("audio/mp4a-latm", 2, "AAC-LC", 44100)
+        assertTrue("Badge must include AAC-LC and 44,100 Hz sample rate: $formattedAacBadge", formattedAacBadge.contains("AAC-LC") && formattedAacBadge.contains("44,100", ignoreCase = true))
         assertNotNull(com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.findCodecByCode("asp"))
         assertNotNull(com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.findCodecByCode("aac"))
         assertNotNull(com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.findCodecByCode("lc"))
         assertNotNull(com.cyosplay.player.util.FfmpegMatroskaCodecRegistry.findCodecByCode("44100hz"))
 
-        // 2. Verify per-folder last setting memory for volume and brightness
+        // 2. Verify true per-video & per-folder setting memory for volume and brightness (no global overwrite)
         viewModel.updateSavedPlayerBrightness(
             value = 0.35f,
             folderKey = "/storage/emulated/0/FolderAlpha",
@@ -1649,8 +1688,9 @@ class ExampleRobolectricTest {
             videoPath = "/storage/emulated/0/FolderAlpha/Video2.mp4"
         )
 
+        // Video1 keeps its own saved per-video settings; Video2 has its own; Video3_New inherits FolderAlpha's latest folder setting
         assertEquals(
-            0.72f,
+            0.35f,
             viewModel.getPlayerBrightnessForVideo(
                 videoPath = "/storage/emulated/0/FolderAlpha/Video1.mp4",
                 folderKey = "/storage/emulated/0/FolderAlpha"
@@ -1658,7 +1698,7 @@ class ExampleRobolectricTest {
             0.01f
         )
         assertEquals(
-            0.84f,
+            0.45f,
             viewModel.getPlayerVolumeForVideo(
                 videoPath = "/storage/emulated/0/FolderAlpha/Video1.mp4",
                 folderKey = "/storage/emulated/0/FolderAlpha"
@@ -1757,8 +1797,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv3_floatingMiniPlayer_44100HzSampleRate_1920x800And495x396_andNavigationWhilePlaying() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 1. Verify 1920x800 and 495x396 Matroska/WebM + 44100 HZ + MPEG-4 part 2 + ASP + AAC + LC
         val ultrawide1920x800 = VideoItem(
@@ -1781,8 +1821,8 @@ class ExampleRobolectricTest {
         )
         assertEquals("1920×800", ultrawide1920x800.resolutionBadge)
         assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("44100 HZ"))
-        assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("libebml v14.2 + libmatroska v1.6.4"))
-        assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("Encoding SW"))
+        assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("AndroidX Media3 Extractor"))
+        assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("Android MediaCodec"))
         assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("Video Codec MPEG-4 part 2"))
         assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("ASP"))
         assertTrue(ultrawide1920x800.matroskaEbmlBadge.contains("AAC"))
@@ -1849,8 +1889,8 @@ class ExampleRobolectricTest {
     @Test
     fun v105rv4_hardwareAccelerationToggle_mediaInfoFfprobe_expandedResolutions_andMiniPlayerSeek() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 1. Verify all new Web/Stream and SD resolutions in VideoItem, Formatters, and FfmpegMatroskaCodecRegistry
         val expectedResolutions = listOf(
@@ -1957,8 +1997,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify CyosPlay 1.06rv11 Versioning & Description
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 2. Verify Force Hardware Acceleration and Battery Smoothness Shield both default to OFF until manually turned ON
         assertFalse(
@@ -2021,7 +2061,7 @@ class ExampleRobolectricTest {
         assertEquals(0f, viewModel.uiState.value.miniPlayerOffsetX, 0.01f)
         assertEquals(0f, viewModel.uiState.value.miniPlayerOffsetY, 0.01f)
 
-        // 4. Verify Auto-Skip Intros & Credits toggle (OFF by default in 1.08rv6) and Night Shield Warmth
+        // 4. Verify Auto-Skip Intros & Credits toggle (OFF by default in 1.08rv7) and Night Shield Warmth
         assertFalse(viewModel.uiState.value.autoSkipIntrosCredits)
         viewModel.setAutoSkipIntrosCredits(true)
         assertTrue(viewModel.uiState.value.autoSkipIntrosCredits)
@@ -2049,8 +2089,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify CyosPlay 1.06rv11 Versioning & Description
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
 
         // 2. Verify Unified Global Brightness & Volume Memory shared across all folders
         val folderA = "/storage/emulated/0/Anime120Fps"
@@ -2061,9 +2101,9 @@ class ExampleRobolectricTest {
         viewModel.updateSavedPlayerBrightness(0.76f, folderB, "$folderB/Movie01.mkv")
         viewModel.updateSavedPlayerVolume(0.84f, folderB, "$folderB/Movie01.mkv")
 
-        // Every folder shares the same last remembered global volume & brightness setting
-        assertEquals(0.76f, viewModel.getPlayerBrightnessForVideo("$folderA/Ep02.mkv", folderA), 0.01f)
-        assertEquals(0.84f, viewModel.getPlayerVolumeForVideo("$folderA/Ep02.mkv", folderA), 0.01f)
+        // Each folder retains its own independent volume & brightness memory
+        assertEquals(0.28f, viewModel.getPlayerBrightnessForVideo("$folderA/Ep02.mkv", folderA), 0.01f)
+        assertEquals(0.62f, viewModel.getPlayerVolumeForVideo("$folderA/Ep02.mkv", folderA), 0.01f)
         assertEquals(0.76f, viewModel.getPlayerBrightnessForVideo("$folderB/Movie02.mkv", folderB), 0.01f)
         assertEquals(0.84f, viewModel.getPlayerVolumeForVideo("$folderB/Movie02.mkv", folderB), 0.01f)
 
@@ -2213,8 +2253,8 @@ class ExampleRobolectricTest {
                 containerHeight = portraitHeight
             )
         )
-        assertFalse(
-            "Brightness/volume swipe must not activate when video is paused",
+        assertTrue(
+            "Brightness/volume swipe must work even while video is paused so users can adjust levels before resuming",
             com.cyosplay.player.util.PlayerGestureControlHelper.canHandlePlaybackVerticalGesture(
                 isPlaying = false,
                 isControlsLocked = false,
@@ -2283,6 +2323,8 @@ class ExampleRobolectricTest {
         assertEquals(0.68f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
         assertEquals(0.82f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
 
+        // Allow Dispatchers.IO preference persistence coroutine to flush before simulating cold restart
+        Thread.sleep(120L)
         // Reopen app (fresh ViewModel & SettingsRepository) and verify levels are restored and invalid values safely clamped
         val restartedVm = VideoPlayerViewModel(context)
         assertEquals(0.68f, restartedVm.uiState.value.savedPlayerBrightness, 0.005f)
@@ -2303,9 +2345,9 @@ class ExampleRobolectricTest {
         viewModel.updateSavedPlayerBrightness(0.78f, folderB, "$folderB/Act1.mkv")
         viewModel.updateSavedPlayerVolume(0.82f, folderB, "$folderB/Act1.mkv")
 
-        // Verify all folders share the same last remembered global brightness & volume
-        assertEquals(0.78f, viewModel.getPlayerBrightnessForVideo("$folderA/Ep2.mkv", folderA), 0.005f)
-        assertEquals(0.82f, viewModel.getPlayerVolumeForVideo("$folderA/Ep2.mkv", folderA), 0.005f)
+        // Verify each folder retains its own independent brightness & volume memory
+        assertEquals(0.34f, viewModel.getPlayerBrightnessForVideo("$folderA/Ep2.mkv", folderA), 0.005f)
+        assertEquals(0.45f, viewModel.getPlayerVolumeForVideo("$folderA/Ep2.mkv", folderA), 0.005f)
         assertEquals(0.78f, viewModel.getPlayerBrightnessForVideo("$folderB/Act2.mkv", folderB), 0.005f)
         assertEquals(0.82f, viewModel.getPlayerVolumeForVideo("$folderB/Act2.mkv", folderB), 0.005f)
 
@@ -2317,10 +2359,16 @@ class ExampleRobolectricTest {
         assertEquals(60f, viewModel.uiState.value.miniPlayerOffsetX, 0.5f)
         assertEquals(-150f, viewModel.uiState.value.miniPlayerOffsetY, 0.5f)
 
-        // Verify Auto-Skip Intros & Credits window resolver
+        // Verify Auto-Skip Intros & Credits window resolver strictly uses real chapter metadata
+        val sampleChapters = listOf(
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Opening Intro", 0L, 85_000L),
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Main Story", 85_000L, 1_140_000L),
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("End Credits", 1_140_000L, 1_199_000L)
+        )
         val introWindow = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(
             totalDurationMs = 1_200_000L,
-            currentPositionMs = 10_000L
+            currentPositionMs = 10_000L,
+            chapters = sampleChapters
         )
         assertTrue(introWindow.isInIntroWindow)
         assertFalse(introWindow.isInCreditsWindow)
@@ -2328,7 +2376,8 @@ class ExampleRobolectricTest {
 
         val creditsWindow = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(
             totalDurationMs = 1_200_000L,
-            currentPositionMs = 1_150_000L
+            currentPositionMs = 1_150_000L,
+            chapters = sampleChapters
         )
         assertFalse(creditsWindow.isInIntroWindow)
         assertTrue(creditsWindow.isInCreditsWindow)
@@ -2526,6 +2575,7 @@ class ExampleRobolectricTest {
             "Pasting from clipboard must execute immediately without staging an extra confirmation dialog",
             viewModel.uiState.value.pendingTransferOperation
         )
+        awaitViewModelFileOp(viewModel)
 
         // 16. Verify 1.06rv8 4-stage fallback chain (HW -> HW+ -> SW+ -> SW), stride alignment, subtitle scaling, error classification, and landscape tilt-fix
         viewModel.setDecoderEngineMode(com.cyosplay.player.data.model.DecoderEngineMode.HW)
@@ -2645,7 +2695,7 @@ class ExampleRobolectricTest {
             )
         )
 
-        // - 1.08rv6 Default Theme (Pure AMOLED Black), Typography, and Text Readability Scale (Compact 90%)
+        // - 1.08rv7 Default Theme (Pure AMOLED Black), Typography, and Text Readability Scale (Compact 90%)
         context.getSharedPreferences("cyos_video_vault_settings", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val freshSettingsRepo = com.cyosplay.player.data.repository.SettingsRepository(context)
         assertEquals(com.cyosplay.player.data.model.AppThemeMode.AMOLED_BLACK, freshSettingsRepo.getThemeMode())
@@ -2708,6 +2758,7 @@ class ExampleRobolectricTest {
                 targetPath = copyFolder.absolutePath
             )
         )
+        awaitViewModelFileOp(viewModel)
         val copiedFileOnDisk = File(copyFolder, "Original_Cinema.mp4")
         assertTrue("Original file must remain untouched on disk after copy", origFile.exists())
         assertTrue("Duplicate file must exist in destination folder after copy", copiedFileOnDisk.exists())
@@ -2726,6 +2777,7 @@ class ExampleRobolectricTest {
                 targetPath = moveFolder.absolutePath
             )
         )
+        awaitViewModelFileOp(viewModel)
         val movedFileOnDisk = File(moveFolder, "Original_Cinema.mp4")
         assertFalse("Original source file must be removed from disk after atomic move", origFile.exists())
         assertTrue("Moved file must exist in destination folder after atomic move", movedFileOnDisk.exists())
@@ -2758,8 +2810,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv10_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Manual Subtitle Text Size Adjustment: + / - buttons (±2sp) and slider up to 56sp
@@ -2815,9 +2867,9 @@ class ExampleRobolectricTest {
         assertFalse(viewModel.uiState.value.playAllSubtitlesSimultaneously)
         assertTrue(viewModel.uiState.value.selectedExternalSubtitleTrackIds.isEmpty())
 
-        // 3. High volume and screen brightness warning alert (>= 80% threshold) + Lower Both action
+        // 3. High volume and screen brightness warning alert (>= 85% threshold) + Lower Both action
         assertEquals(
-            "High volume and screen brightness detected. Lowering both helps protect your hearing, reduce eye strain, and save battery.",
+            com.cyosplay.player.util.PlayerGestureControlHelper.HIGH_VOLUME_AND_BRIGHTNESS_WARNING_TEXT,
             viewModel.uiState.value.highVolumeBrightnessWarningMessage
         )
         viewModel.updateSavedPlayerBrightness(0.85f)
@@ -2856,8 +2908,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv13_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. VideoPlayerFileMover normalizeVideoRelativePath & moveVideoFile verification
@@ -2966,8 +3018,8 @@ class ExampleRobolectricTest {
     @Test
     fun v106rv14_features_verification() {
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify moveVideoViaVideoPlayerFileMover releases active mini-player handle & updates folder lists immediately
@@ -3043,8 +3095,8 @@ class ExampleRobolectricTest {
     fun v106rv15_features_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify Large (24sp) and Transparent (75% opacity, no background box) subtitle defaults
@@ -3140,8 +3192,8 @@ class ExampleRobolectricTest {
     fun v106rv16_features_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 1. Verify buildVideoContentUri & deleteVideoFromMediaStore helper
@@ -3262,8 +3314,8 @@ class ExampleRobolectricTest {
     fun v106rv17_permanentDelete_trueMove_sidecarSubtitles_andJarBuildPassword_verification() {
         context.getSharedPreferences("cyosplay_secure_settings_v2", android.content.Context.MODE_PRIVATE).edit().clear().commit()
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         val testRoot = File(context.cacheDir, "v106rv17_test_root").apply {
@@ -3392,6 +3444,7 @@ class ExampleRobolectricTest {
             targetPath = targetMoveFolder.absolutePath
         )
         viewModel.executeCopyOrMoveToDestination(moveDest)
+        awaitViewModelFileOp(viewModel)
         val movedDestFile = File(targetMoveFolder, "TrueMove_17.mp4")
         assertFalse("Original file must NOT exist in source folder after Move", moveSourceFile.exists())
         assertTrue("Moved file MUST exist in destination folder after Move", movedDestFile.exists())
@@ -3422,7 +3475,7 @@ class ExampleRobolectricTest {
         }
         val movedVideoItem = viewModel.uiState.value.allVideos.first { it.path == movedDestFile.absolutePath }
         viewModel.playVideo(movedVideoItem, listOf(movedVideoItem))
-        // 1.08rv6 defers sidecar subtitle discovery off the tap hot path until first frame; invoke explicitly in headless test
+        // 1.08rv7 defers sidecar subtitle discovery off the tap hot path until first frame; invoke explicitly in headless test
         viewModel.discoverSidecarSubtitlesForVideo(movedVideoItem)
         assertTrue(
             "Sidecar multi-language subtitles (.hi.srt, .ar.srt) must be auto-discovered on playback",
@@ -3456,8 +3509,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.06rv18 and zero debug/logs
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify Per-Video Audio Selection Memory (remember last audio track setting for each video)
@@ -3561,7 +3614,7 @@ class ExampleRobolectricTest {
         )
         viewModel.addVideoItemToLibrary(videoItem)
         viewModel.playVideo(videoItem, listOf(videoItem))
-        // 1.08rv6 defers sidecar subtitle scanning off the tap hot path until first frame; invoke discovery explicitly in headless test
+        // 1.08rv7 defers sidecar subtitle scanning off the tap hot path until first frame; invoke discovery explicitly in headless test
         viewModel.discoverSidecarSubtitlesForVideo(videoItem)
 
         // Sidecar subtitles must be discovered, but NOT selected until user selects
@@ -3662,8 +3715,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv2 and zero debug/logs
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         val testRoot = File(context.cacheDir, "cyos_107rv_test_${System.currentTimeMillis()}").apply { mkdirs() }
@@ -3749,6 +3802,7 @@ class ExampleRobolectricTest {
 
         // Empty Recycle Bin -> MUST permanently delete remaining files (physicalVideo2) from storage AND remove Recycle Bin records
         viewModel.emptyRecycleBin()
+        awaitViewModelFileOp(viewModel)
         assertFalse(
             "Empty Recycle Bin MUST delete the actual physical file 2 from device storage",
             physicalVideo2.exists()
@@ -3786,7 +3840,7 @@ class ExampleRobolectricTest {
         )
         viewModel.addVideoItemToLibrary(subVideoItem)
         viewModel.playVideo(subVideoItem, listOf(subVideoItem))
-        // 1.08rv6 defers sidecar subtitle scanning off the tap hot path until first frame; invoke discovery explicitly in headless test
+        // 1.08rv7 defers sidecar subtitle scanning off the tap hot path until first frame; invoke discovery explicitly in headless test
         viewModel.discoverSidecarSubtitlesForVideo(subVideoItem)
 
         // Simulate discovering 2 embedded subtitle tracks while video is playing
@@ -3837,8 +3891,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv2 and zero debug/logs
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify XvidMatroskaExtractor csd-0 extraction (00 00 01 B0 F5 ... 00 00 01 20 ... up to 00 00 01 B6)
@@ -3913,7 +3967,17 @@ class ExampleRobolectricTest {
         assertNotNull("Format must be emitted on first keyframe with video/mp4v-es", capturedFormat)
         assertEquals(androidx.media3.common.MimeTypes.VIDEO_MP4V, capturedFormat!!.sampleMimeType)
         assertEquals("mp4v.20.5", capturedFormat!!.codecs)
-        assertEquals(396f / 563f, capturedFormat!!.pixelWidthHeightRatio, 0.0001f)
+        // Normal square-pixel 16:9 704x396 (PAR == 1.0f) must NOT be squished
+        assertEquals(1.0f, capturedFormat!!.pixelWidthHeightRatio, 0.0001f)
+        // Explicit anamorphic SAR 396:563 (704x396 -> 4:3) normalizes cleanly to 0.75f
+        val anamorphicPar = com.cyosplay.player.XvidFixingTrackOutput.resolveNormalizedPixelAspectRatio(
+            androidx.media3.common.Format.Builder()
+                .setWidth(704)
+                .setHeight(396)
+                .setPixelWidthHeightRatio(396f / 563f)
+                .build()
+        )
+        assertEquals(0.75f, anamorphicPar, 0.0001f)
         assertEquals(1, capturedFormat!!.initializationData.size)
         assertTrue(capturedFormat!!.initializationData[0].contentEquals(extractedCsd0))
         assertNotNull("First keyframe sample bytes must be flushed downstream after format()", capturedSampleBytes)
@@ -3995,8 +4059,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv3 and zero debug/logs
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify CyosPlayerMediaStoreDeleter (package com.cyos.player) deletes video + sidecar subtitles and releases ExoPlayer handle
@@ -4070,7 +4134,7 @@ class ExampleRobolectricTest {
         unrelatedSrt.delete()
         testDir.deleteRecursively()
 
-        // 3. Verify High Volume & Screen Brightness Warning Alert at >= 85% automatically lowers both to 50%
+        // 3. Verify High Volume & Screen Brightness Warning Alert at >= 85% is non-destructive and provides Lower Both
         viewModel.dismissHighVolumeBrightnessWarning()
         viewModel.updateSavedPlayerBrightness(0.86f)
         viewModel.updateSavedPlayerVolume(0.90f)
@@ -4079,17 +4143,21 @@ class ExampleRobolectricTest {
             viewModel.uiState.value.showHighVolumeBrightnessWarning
         )
         assertEquals(
-            "Brightness must automatically lower to 50% (0.50f) when both reach >= 85%",
-            0.50f,
+            "Non-destructive warning must preserve user's brightness slider until Lower Both is tapped",
+            0.86f,
             viewModel.uiState.value.savedPlayerBrightness,
             0.005f
         )
         assertEquals(
-            "Volume must automatically lower to 50% (0.50f) when both reach >= 85%",
-            0.50f,
+            "Non-destructive warning must preserve user's volume slider until Lower Both is tapped",
+            0.90f,
             viewModel.uiState.value.savedPlayerVolume,
             0.005f
         )
+        viewModel.lowerBothVolumeAndBrightness()
+        assertFalse(viewModel.uiState.value.showHighVolumeBrightnessWarning)
+        assertEquals(0.50f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
+        assertEquals(0.50f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
 
         // 4. Verify strict gesture isolation (Zoom, Volume, Brightness, Horizontal Seek, Hold 2x Skip)
         assertFalse(
@@ -4177,8 +4245,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv4 and zero debug/logs
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Fix a: Verify XvidSupportExtractorsFactory uses DefaultSubtitleParserFactory() (never UNSUPPORTED)
@@ -4280,42 +4348,48 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv5 and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
-        // 2. Verify High Volume & Screen Brightness Warning Alert automatically resets to 50% (0.50f)
-        // whenever EITHER volume OR brightness reaches or exceeds 85% (0.85f)
+        // 2. Verify High Volume & Screen Brightness Warning Alert requires BOTH volume >= 85%
+        // AND brightness >= 85% (non-destructive), and Lower Both drops both to 50% on user tap
         viewModel.dismissHighVolumeBrightnessWarning()
         viewModel.updateSavedPlayerBrightness(0.60f)
         viewModel.updateSavedPlayerVolume(0.70f)
         assertFalse(viewModel.uiState.value.showHighVolumeBrightnessWarning)
 
-        // Exceed 85% on brightness alone (0.86f while volume is 0.70f) -> must reset both to 50% and show warning
+        // Exceed 85% on brightness alone (0.86f while volume is 0.70f) -> does NOT trigger warning
         viewModel.updateSavedPlayerBrightness(0.86f)
-        assertTrue(
-            "Exceeding 85% brightness alone must trigger showHighVolumeBrightnessWarning",
+        assertFalse(
+            "Exceeding 85% brightness alone must NOT trigger high volume & brightness warning",
             viewModel.uiState.value.showHighVolumeBrightnessWarning
         )
+        assertEquals(0.86f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
+        assertEquals(0.70f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
+
+        // Now also raise volume to >= 85% (0.88f while brightness is 0.86f) -> shows warning without snapping sliders
+        viewModel.updateSavedPlayerVolume(0.88f)
+        assertTrue(
+            "Both brightness >= 85% and volume >= 85% must trigger showHighVolumeBrightnessWarning",
+            viewModel.uiState.value.showHighVolumeBrightnessWarning
+        )
+        assertEquals(0.88f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
+        assertEquals(0.86f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
+
+        // Tapping Lower Both lowers both to 50% and dismisses the warning
+        viewModel.lowerBothVolumeAndBrightness()
+        assertFalse(viewModel.uiState.value.showHighVolumeBrightnessWarning)
         assertEquals(0.50f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
         assertEquals(0.50f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
 
-        // Subsequent finger release saving 0.50f must keep showHighVolumeBrightnessWarning active until dismissed
-        viewModel.updateSavedPlayerBrightness(0.50f)
-        assertTrue(
-            "Warning alert must remain active after finger release at 50% until dismissed",
-            viewModel.uiState.value.showHighVolumeBrightnessWarning
-        )
-
-        // Dismiss and exceed 85% on volume alone (0.85f while brightness is 0.50f) -> must reset to 50% and show warning again
-        viewModel.dismissHighVolumeBrightnessWarning()
-        assertFalse(viewModel.uiState.value.showHighVolumeBrightnessWarning)
+        // Exceed 85% on volume alone (0.85f while brightness is 0.50f) -> does NOT trigger warning
         viewModel.updateSavedPlayerVolume(0.85f)
-        assertTrue(
-            "Reaching 85% volume alone must trigger showHighVolumeBrightnessWarning again",
+        assertFalse(
+            "Reaching 85% volume alone must NOT trigger showHighVolumeBrightnessWarning",
             viewModel.uiState.value.showHighVolumeBrightnessWarning
         )
-        assertEquals(0.50f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
+        assertEquals(0.85f, viewModel.uiState.value.savedPlayerVolume, 0.005f)
         assertEquals(0.50f, viewModel.uiState.value.savedPlayerBrightness, 0.005f)
 
         // 3. Verify 6-way video playback gesture isolation (Zoom, Volume, Brightness, Sliding Skip, Hold Skip, Double-Tap Skip)
@@ -4390,8 +4464,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv6 and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify direct zero-cache CyosSmartDataSourceFactory (media disk cache removed in 1.08rv5)
@@ -4404,7 +4478,7 @@ class ExampleRobolectricTest {
         val memBudget = com.cyosplay.player.util.MemoryManager.detectMemoryBudget(context)
         assertTrue("Back buffer must stay bounded (6-15s)", memBudget.backBufferDurationMs in 6_000..15_000)
         assertTrue(memBudget.retainBackBufferFromKeyframe)
-        assertTrue("Time thresholds prioritized for instant startup", memBudget.prioritizeTimeOverSizeThresholds)
+        assertFalse("Byte buffer caps must be enforced on 4K/8K streams", memBudget.prioritizeTimeOverSizeThresholds)
         assertTrue("Target buffer must be explicitly byte-capped", memBudget.targetBufferBytes in (6 * 1024 * 1024)..(32 * 1024 * 1024))
 
         // 4. Verify CyosFastPlayerManager instantiation, playlist submission & clean release
@@ -4539,8 +4613,8 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify version 1.07rv8, CyosPlay 1.07rv8 description, and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
         // 2. Verify direct zero-cache CyosSmartDataSourceFactory & direct media source factory
@@ -4630,10 +4704,10 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify 1.07rv7a branding, About Us "Created by Tkm", and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertEquals("Created by Tkm", viewModel.uiState.value.aboutUsCreator)
-        assertEquals("CyosPlay 1.08rv6", context.getString(R.string.about_us_description))
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
         assertEquals("Created by Tkm", context.getString(R.string.about_us_creator))
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
@@ -4754,11 +4828,11 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify 1.08rv4 branding, About Us "Created by Tkm", closed-source copyright, and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
         assertEquals("Created by Tkm", viewModel.uiState.value.aboutUsCreator)
         assertEquals("© 2026 TKm. All rights reserved.", viewModel.uiState.value.aboutUsCopyright)
-        assertEquals("CyosPlay 1.08rv6", context.getString(R.string.about_us_description))
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
         assertEquals("Created by Tkm", context.getString(R.string.about_us_creator))
         assertEquals("© 2026 TKm. All rights reserved.", context.getString(R.string.about_us_copyright))
         assertEquals("Third-Party Open Source Licenses", context.getString(R.string.open_source_licenses_title))
@@ -4813,7 +4887,7 @@ class ExampleRobolectricTest {
         )
         assertTrue(com.cyosplay.player.isSubtitleOrTextTrackPlaybackError(null, assSubtitleCrash))
 
-        // 4. Verify CyosPlay is Closed-Source Copyright (not MIT) & credits Media3 (Apache 2.0) and FFmpeg (LGPL v2.1+)
+        // 4. Verify CyosPlay is Closed-Source Copyright & honestly credits bundled Apache 2.0 libraries (no unbundled FFmpeg claim)
         assertEquals("© 2026 TKm. All rights reserved.", com.cyosplay.player.data.OpenSourceLicenses.APP_COPYRIGHT_NOTICE)
         assertEquals("Closed-Source", com.cyosplay.player.data.OpenSourceLicenses.APP_LICENSE_POSTURE)
         assertTrue(com.cyosplay.player.data.OpenSourceLicenses.APP_PROPRIETARY_NOTICE.contains("closed-source"))
@@ -4822,7 +4896,7 @@ class ExampleRobolectricTest {
                 .contains("does not make CyosPlay itself open source")
         )
         val notices = com.cyosplay.player.data.OpenSourceLicenses.thirdPartyNotices
-        assertEquals(2, notices.size)
+        assertEquals(3, notices.size)
         assertTrue(
             notices.any {
                 it.id == "androidx_media3_exoplayer" &&
@@ -4831,13 +4905,11 @@ class ExampleRobolectricTest {
                     it.licenseText.contains("Apache License, Version 2.0")
             }
         )
-        assertTrue(
-            notices.any {
-                it.id == "ffmpeg" &&
-                    it.libraryName == "FFmpeg" &&
-                    it.licenseType == "LGPL v2.1+" &&
-                    it.licenseText.contains("LGPL v2.1+")
-            }
+        assertTrue(notices.any { it.id == "androidx_compose_material3" && it.licenseType == "Apache 2.0" })
+        assertTrue(notices.any { it.id == "androidx_security_biometric" && it.licenseType == "Apache 2.0" })
+        assertFalse(
+            "Unbundled FFmpeg must not be listed as a bundled notice",
+            notices.any { it.id == "ffmpeg" }
         )
 
         // 5. Verify locked Hold Skip (2x + 1x..5x smooth stepping) & locked coalesced Double-Tap Skip (±10s..±30s)
@@ -4921,9 +4993,9 @@ class ExampleRobolectricTest {
         val viewModel = VideoPlayerViewModel(context)
 
         // 1. Verify 1.08rv5 branding, About Us, and permanent non-debug mode
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
-        assertEquals("CyosPlay 1.08rv6", context.getString(R.string.about_us_description))
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
         assertEquals("Created by Tkm", context.getString(R.string.about_us_creator))
         assertTrue(CryptoSecurityManager.isDebugModePermanentlyDisabled())
 
@@ -4965,7 +5037,7 @@ class ExampleRobolectricTest {
             forceLowRamMode = true,
             batterySaverEnabled = true
         )
-        assertTrue(standardBudget.prioritizeTimeOverSizeThresholds)
+        assertFalse(standardBudget.prioritizeTimeOverSizeThresholds)
         assertTrue(standardBudget.targetBufferBytes in (6 * 1024 * 1024)..(32 * 1024 * 1024))
         assertTrue(batteryBudget.targetBufferBytes <= standardBudget.targetBufferBytes)
         assertTrue(batteryBudget.positionPollingIntervalMs >= standardBudget.positionPollingIntervalMs)
@@ -5072,11 +5144,11 @@ class ExampleRobolectricTest {
         assertFalse(afterOpened.hasNewFolders)
         assertTrue(afterOpened.seenFolderIds.contains("bucket_downloads"))
 
-        // 2. ViewModel defaults (Pure AMOLED Black, Compact 90%, Auto-Skip OFF, 1.08rv6)
+        // 2. ViewModel defaults (Pure AMOLED Black, Compact 90%, Auto-Skip OFF, 1.08rv7)
         val viewModel = VideoPlayerViewModel(context)
-        assertEquals("1.08rv6", viewModel.uiState.value.appVersionName)
-        assertEquals("CyosPlay 1.08rv6", viewModel.uiState.value.appDescription)
-        assertEquals("CyosPlay 1.08rv6", context.getString(R.string.about_us_description))
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
         assertEquals(com.cyosplay.player.data.model.AppThemeMode.AMOLED_BLACK, viewModel.uiState.value.themeMode)
         assertEquals(com.cyosplay.player.data.model.AdaptiveTextScaleMode.COMPACT, viewModel.uiState.value.textScaleMode)
         assertFalse(viewModel.uiState.value.autoSkipIntrosCredits)
@@ -5138,5 +5210,842 @@ class ExampleRobolectricTest {
         assertTrue(com.cyosplay.player.data.repository.VideoRepository.SUPPORTED_VIDEO_EXTENSIONS.contains("mxf"))
         assertTrue(com.cyosplay.player.data.repository.VideoRepository.SUPPORTED_VIDEO_EXTENSIONS.contains("ogv"))
         assertTrue(com.cyosplay.player.data.repository.VideoRepository.SUPPORTED_VIDEO_EXTENSIONS.contains("f4v"))
+    }
+
+    @Test
+    fun auditPillar1_vaultStagingCleanup_twoPhaseRotationRollback_playerTrimGuard_multiChannelAudio_andLargeXvidKeyframe() {
+        // 1. VaultManager cleans up .tmp_<nanoTime>, .dec_tmp_, and .rot_plain_/.rot_enc_ staging files on startup
+        val vaultDir = File(context.filesDir, "private_encrypted_vault").apply { mkdirs() }
+        val staleTmp = File(vaultDir, "clip1.cyosvault.tmp_123456789").apply { writeBytes(ByteArray(32) { 1 }) }
+        val staleDec = File(vaultDir, "clip2.dec_tmp_987654").apply { writeBytes(ByteArray(32) { 2 }) }
+        val staleRot = File(vaultDir, "clip3.cyosvault.rot_plain_555").apply { writeBytes(ByteArray(32) { 3 }) }
+        val realVaultFile = File(vaultDir, "valid_entry.cyosvault").apply { writeBytes(ByteArray(32) { 4 }) }
+
+        val vaultManager = com.cyosplay.player.data.repository.VaultManager(context)
+        assertFalse("Interrupted .tmp_<nanoTime> staging file must be deleted", staleTmp.exists())
+        assertFalse("Interrupted .dec_tmp_ file must be deleted", staleDec.exists())
+        assertFalse("Interrupted .rot_plain_ file must be deleted", staleRot.exists())
+        assertTrue("Valid encrypted vault file must remain intact", realVaultFile.exists())
+        realVaultFile.delete()
+        vaultManager.release()
+
+        // 2. Two-phase atomic key rotation rolls back if a listener fails during prepareMasterKeyRotation()
+        val beforeCipher = CryptoSecurityManager.encryptString(context, "ATOMIC_DEK_GUARD")
+        val initialRotCount = CryptoSecurityManager.getAutoRotationCount(context)
+        var rollbackCalled = false
+        val failingListener = object : CryptoSecurityManager.TwoPhaseKeyRotationListener {
+            override fun prepareMasterKeyRotation(oldKey: javax.crypto.SecretKey, newKey: javax.crypto.SecretKey): Boolean = false
+            override fun commitMasterKeyRotation(newKey: javax.crypto.SecretKey) = Unit
+            override fun rollbackMasterKeyRotation(oldKey: javax.crypto.SecretKey) {
+                rollbackCalled = true
+            }
+        }
+        CryptoSecurityManager.registerRotationListener(failingListener)
+        try {
+            val afterCount = CryptoSecurityManager.rotateDynamicEncryptionKey(context, "test_abort_rotation")
+            assertEquals("Rotation count must NOT increment if prepareMasterKeyRotation fails", initialRotCount, afterCount)
+            assertTrue("Rollback must be invoked on aborted two-phase rotation", rollbackCalled)
+            assertEquals("ATOMIC_DEK_GUARD", CryptoSecurityManager.decryptString(context, beforeCipher))
+        } finally {
+            CryptoSecurityManager.unregisterRotationListener(failingListener)
+        }
+
+        // 3. CyosPlayerHolder refuses to destroy active player during trimMemory when attached or in PiP
+        com.cyos.player.CyosPlayerHolder.release()
+        val session = com.cyos.player.CyosPlayerHolder.getOrCreateSession(context = context, codecProfileKey = "AUDIT_GUARD")
+        com.cyos.player.CyosPlayerHolder.markPlayerAttached()
+        try {
+            assertTrue(com.cyos.player.CyosPlayerHolder.isActivelyInUse())
+            com.cyos.player.CyosPlayerHolder.trimOrReleaseOnMemoryPressure(
+                context = context,
+                trimLevel = android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+            )
+            assertNotNull(
+                "Active attached player must NOT be destroyed on memory trim",
+                com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+            )
+            assertTrue(session.player === com.cyos.player.CyosPlayerHolder.currentPlayerOrNull())
+        } finally {
+            com.cyos.player.CyosPlayerHolder.markPlayerDetached()
+        }
+        com.cyos.player.CyosPlayerHolder.setPipActive(true)
+        try {
+            com.cyos.player.CyosPlayerHolder.trimOrReleaseOnMemoryPressure(
+                context = context,
+                trimLevel = android.content.ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN
+            )
+            assertNotNull(
+                "Active PiP player must NOT be destroyed on TRIM_MEMORY_UI_HIDDEN",
+                com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+            )
+        } finally {
+            com.cyos.player.CyosPlayerHolder.setPipActive(false)
+            com.cyos.player.CyosPlayerHolder.release()
+        }
+
+        // 4. Eac3DownmixAudioProcessor properly consumes all channels for 3ch, 4ch, and 5ch PCM without frame desync
+        for (channels in listOf(3, 4, 5)) {
+            val processor = com.cyosplay.player.util.Eac3DownmixAudioProcessor()
+            val outFmt = processor.configure(
+                androidx.media3.common.audio.AudioProcessor.AudioFormat(
+                    48_000,
+                    channels,
+                    androidx.media3.common.C.ENCODING_PCM_16BIT
+                )
+            )
+            assertEquals("Output must downmix ${channels}ch to stereo", 2, outFmt.channelCount)
+            processor.flush()
+            val frameCount = 16
+            val input = java.nio.ByteBuffer.allocate(frameCount * channels * 2).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            for (f in 0 until frameCount) {
+                for (c in 0 until channels) {
+                    input.putShort(4000.toShort())
+                }
+            }
+            input.flip()
+            processor.queueInput(input)
+            assertEquals("All input PCM bytes must be consumed for ${channels}ch", 0, input.remaining())
+            val output = processor.getOutput()
+            assertEquals(
+                "Output must contain exactly $frameCount stereo frames for ${channels}ch",
+                frameCount * 2 * 2,
+                output.remaining()
+            )
+            var nonZeroSamples = 0
+            while (output.remaining() >= 2) {
+                if (output.short.toInt() != 0) nonZeroSamples++
+            }
+            assertTrue("Downmixed ${channels}ch output must contain valid non-zero audio samples", nonZeroSamples > 0)
+        }
+
+        // 5. XvidFixingTrackOutput handles >256 KB first keyframes without infinite loop or truncation
+        var flushedBytes = 0
+        var emittedFormat: androidx.media3.common.Format? = null
+        val sink = object : androidx.media3.extractor.TrackOutput {
+            override fun format(format: androidx.media3.common.Format) {
+                emittedFormat = format
+            }
+            override fun sampleData(
+                input: androidx.media3.common.DataReader,
+                length: Int,
+                allowEndOfInput: Boolean,
+                sampleDataPart: Int
+            ): Int = length
+            override fun sampleData(data: androidx.media3.common.util.ParsableByteArray, length: Int, sampleDataPart: Int) {
+                flushedBytes += length
+                data.skipBytes(length)
+            }
+            override fun sampleMetadata(
+                timeUs: Long,
+                flags: Int,
+                size: Int,
+                offset: Int,
+                cryptoData: androidx.media3.extractor.TrackOutput.CryptoData?
+            ) = Unit
+        }
+        val xvidOut = com.cyosplay.player.XvidFixingTrackOutput(sink)
+        xvidOut.format(
+            androidx.media3.common.Format.Builder()
+                .setSampleMimeType(androidx.media3.common.MimeTypes.VIDEO_UNKNOWN)
+                .setWidth(1280)
+                .setHeight(720)
+                .build()
+        )
+        val hugeKeyframe = ByteArray(300 * 1024) { 0x5A }
+        // Prefix with valid MPEG-4 VOL + VOP headers so csd-0 extraction succeeds
+        hugeKeyframe[0] = 0x00; hugeKeyframe[1] = 0x00; hugeKeyframe[2] = 0x01; hugeKeyframe[3] = 0xB0.toByte()
+        hugeKeyframe[4] = 0x05; hugeKeyframe[5] = 0x00; hugeKeyframe[6] = 0x00; hugeKeyframe[7] = 0x01
+        hugeKeyframe[8] = 0x20; hugeKeyframe[9] = 0x00; hugeKeyframe[10] = 0x00; hugeKeyframe[11] = 0x01
+        hugeKeyframe[12] = 0xB6.toByte()
+        xvidOut.sampleData(androidx.media3.common.util.ParsableByteArray(hugeKeyframe), hugeKeyframe.size, 0)
+        xvidOut.sampleMetadata(0L, androidx.media3.common.C.BUFFER_FLAG_KEY_FRAME, hugeKeyframe.size, 0, null)
+        assertNotNull("Large >256 KB keyframe must still emit normalized format", emittedFormat)
+        assertEquals("All 300 KB of first keyframe must flush downstream without truncation", hugeKeyframe.size, flushedBytes)
+    }
+
+    @Test
+    fun auditPillar2To4_introSkipChaptersOnly_dynamicMiniPlayerClamp_sleepAndBackgroundAudio_andStrictReleaseScript() {
+        val viewModel = VideoPlayerViewModel(context)
+
+        // 1. Intro/Credits skip must NEVER fabricate arbitrary timestamps when chapters are absent
+        val noChapters = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(
+            totalDurationMs = 3_600_000L,
+            currentPositionMs = 30_000L,
+            chapters = emptyList()
+        )
+        assertFalse("Must not fabricate intro window without real chapters", noChapters.isInIntroWindow)
+        assertFalse("Must not fabricate credits window without real chapters", noChapters.isInCreditsWindow)
+
+        val realChapters = listOf(
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Intro", 0L, 90_000L),
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Episode 1", 90_000L, 1_320_000L),
+            com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("End Credits", 1_320_000L, 1_440_000L)
+        )
+        val inIntro = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(1_440_000L, 25_000L, realChapters)
+        assertTrue(inIntro.isInIntroWindow)
+        assertEquals(90_000L, inIntro.introSkipTargetMs)
+        val inMain = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(1_440_000L, 600_000L, realChapters)
+        assertFalse(inMain.isInIntroWindow)
+        assertFalse(inMain.isInCreditsWindow)
+        val inCredits = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(1_440_000L, 1_350_000L, realChapters)
+        assertTrue(inCredits.isInCreditsWindow)
+        assertEquals(1_440_000L, inCredits.creditsSkipTargetMs)
+
+        // 2. Dynamic mini-player bounds clamping keeps bar inside any viewport
+        viewModel.resetMiniPlayerOffset()
+        viewModel.dragMiniPlayerByDelta(dx = 5000f, dy = -5000f, maxHalfX = 180f, maxUpY = 420f)
+        assertEquals(180f, viewModel.uiState.value.miniPlayerOffsetX, 0.01f)
+        assertEquals(-420f, viewModel.uiState.value.miniPlayerOffsetY, 0.01f)
+        viewModel.dragMiniPlayerByDelta(dx = -5000f, dy = 5000f, maxHalfX = 180f, maxUpY = 420f)
+        assertEquals(-180f, viewModel.uiState.value.miniPlayerOffsetX, 0.01f)
+        assertEquals(0f, viewModel.uiState.value.miniPlayerOffsetY, 0.01f)
+
+        // 3. Sleep timer & background audio toggles update real ViewModel state cleanly
+        viewModel.setSleepTimerOption(com.cyosplay.player.data.model.SleepTimerOption.END_OF_VIDEO)
+        assertEquals(com.cyosplay.player.data.model.SleepTimerOption.END_OF_VIDEO, viewModel.uiState.value.sleepTimerOption)
+        viewModel.setSleepTimerOption(com.cyosplay.player.data.model.SleepTimerOption.OFF)
+        assertEquals(com.cyosplay.player.data.model.SleepTimerOption.OFF, viewModel.uiState.value.sleepTimerOption)
+
+        val initialBgAudio = viewModel.uiState.value.backgroundAudioEnabled
+        viewModel.toggleBackgroundAudio()
+        assertEquals(!initialBgAudio, viewModel.uiState.value.backgroundAudioEnabled)
+        viewModel.toggleBackgroundAudio()
+        assertEquals(initialBgAudio, viewModel.uiState.value.backgroundAudioEnabled)
+    }
+
+    @Test
+    fun v108rv7_zeroPlaintextVaultStreaming_flagSecure_autoLock_subtitleCharsets_andHardening() {
+        // 1. Zero-plaintext chunked AES-256-GCM streaming Vault playback + O(1) random-access seek + tamper rejection
+        val tempDir = File(context.cacheDir, "v108rv7_vault_stream_test_${System.currentTimeMillis()}").apply { mkdirs() }
+        val plainSize = 620_000 // > 2 chunks (262_144 * 2 = 524_288) so 3 chunks total
+        val originalPlain = ByteArray(plainSize) { idx -> ((idx * 37 + 13) and 0xFF).toByte() }
+        val srcFile = File(tempDir, "secret_clip.mp4").apply { writeBytes(originalPlain) }
+
+        val vaultManager = com.cyosplay.player.data.repository.VaultManager(context)
+        val sourceVideo = VideoItem(
+            id = 9901087L,
+            title = "SecretClip",
+            displayName = "secret_clip.mp4",
+            uri = Uri.fromFile(srcFile),
+            path = srcFile.absolutePath,
+            sizeBytes = originalPlain.size.toLong(),
+            durationMs = 42_000L,
+            dateModifiedSeconds = System.currentTimeMillis() / 1000L,
+            width = 1920,
+            height = 1080,
+            mimeType = "video/mp4",
+            folderId = "movies",
+            folderName = "Movies",
+            folderPath = tempDir.absolutePath
+        )
+        val entry = vaultManager.moveVideoToVault(sourceVideo, isDecoyEntry = false)
+        assertNotNull("Vault move must succeed", entry)
+        val encFile = File(entry!!.encryptedFilePath)
+        assertTrue("Encrypted V4 file must exist", encFile.exists() && CryptoSecurityManager.isStreamV4File(encFile))
+
+        val ephemeralDir = File(context.cacheDir, "vault_ephemeral_play")
+        vaultManager.wipeEphemeralPlaybackCache()
+        val playable = vaultManager.prepareEphemeralPlaybackItem(entry)
+        assertNotNull("V3 Vault playback item must prepare cleanly", playable)
+        assertEquals(
+            "V3 Vault video must stream via cyosvault:// scheme",
+            com.cyos.player.VaultChunkedAesGcmDataSource.SCHEME,
+            playable!!.uri.scheme
+        )
+        val ephemeralFilesAfterPrepare = ephemeralDir.listFiles()?.toList().orEmpty()
+        assertTrue(
+            "Zero plaintext files may be written to vault_ephemeral_play/ for V3 streaming",
+            ephemeralFilesAfterPrepare.isEmpty()
+        )
+
+        // Sequential full read via VaultChunkedAesGcmDataSource must match original plaintext byte-for-byte
+        val ds = com.cyos.player.VaultChunkedAesGcmDataSource(context)
+        val fullReadOut = java.io.ByteArrayOutputStream()
+        try {
+            val openedLen = ds.open(androidx.media3.datasource.DataSpec(playable.uri))
+            assertEquals(originalPlain.size.toLong(), openedLen)
+            val buf = ByteArray(16_384)
+            while (true) {
+                val n = ds.read(buf, 0, buf.size)
+                if (n == androidx.media3.common.C.RESULT_END_OF_INPUT) break
+                fullReadOut.write(buf, 0, n)
+            }
+        } finally {
+            ds.close()
+        }
+        assertArrayEquals("Streamed plaintext must match original bytes exactly", originalPlain, fullReadOut.toByteArray())
+
+        // Random-access seek across chunk boundaries (chunk 1 & chunk 2)
+        val seekOffsets = listOf(262_144L + 1234L, 524_288L + 77L, 100L)
+        for (seekPos in seekOffsets) {
+            val seekDs = com.cyos.player.VaultChunkedAesGcmDataSource(context)
+            try {
+                val expectedLen = 4096
+                val rem = seekDs.open(androidx.media3.datasource.DataSpec(playable.uri, seekPos, expectedLen.toLong()))
+                assertEquals(expectedLen.toLong(), rem)
+                val actual = ByteArray(expectedLen)
+                var got = 0
+                while (got < expectedLen) {
+                    val r = seekDs.read(actual, got, expectedLen - got)
+                    if (r == androidx.media3.common.C.RESULT_END_OF_INPUT) break
+                    got += r
+                }
+                assertEquals(expectedLen, got)
+                val expectedSlice = originalPlain.copyOfRange(seekPos.toInt(), seekPos.toInt() + expectedLen)
+                assertArrayEquals("Random-access seek at $seekPos must match plaintext", expectedSlice, actual)
+            } finally {
+                seekDs.close()
+            }
+        }
+
+        // Tamper detection: flipping a byte in chunk 1 ciphertext inside private_encrypted_vault must fail GCM authentication
+        val vaultDir = File(context.filesDir, "private_encrypted_vault").apply { mkdirs() }
+        val tamperedFile = File(vaultDir, "tampered_${System.nanoTime()}.cyosvault")
+        encFile.copyTo(tamperedFile, overwrite = true)
+        java.io.RandomAccessFile(tamperedFile, "rw").use { raf ->
+            raf.seek(400L)
+            val b = raf.read()
+            raf.seek(400L)
+            raf.write(b xor 0xFF)
+        }
+        val tamperedUri = com.cyos.player.VaultChunkedAesGcmDataSource.buildVaultUri(tamperedFile.absolutePath, "tampered.mp4")
+        val tamperDs = com.cyos.player.VaultChunkedAesGcmDataSource(context)
+        var tamperRejected = false
+        try {
+            tamperDs.open(androidx.media3.datasource.DataSpec(tamperedUri))
+            val probe = ByteArray(64)
+            tamperDs.read(probe, 0, probe.size)
+        } catch (_: java.io.IOException) {
+            tamperRejected = true
+        } finally {
+            tamperDs.close()
+            tamperedFile.delete()
+        }
+        assertTrue("Tampered V3 chunk must be rejected by AES-GCM tag verification", tamperRejected)
+
+        // 2. Private Vault FLAG_SECURE helper catches all Vault representations and excludes normal videos
+        assertTrue(VideoPlayerViewModel.isVaultVideoItem(playable))
+        assertTrue(
+            VideoPlayerViewModel.isVaultVideoItem(
+                playable.copy(folderId = "other", uri = Uri.parse("file:///cache/vault_ephemeral_play/play_1.mp4"), path = "/cache/vault_ephemeral_play/play_1.mp4")
+            )
+        )
+        assertTrue(
+            VideoPlayerViewModel.isVaultVideoItem(
+                playable.copy(folderId = "other", uri = Uri.parse("file:///files/private_encrypted_vault/x.cyosvault"), path = "/files/private_encrypted_vault/x.cyosvault")
+            )
+        )
+        assertFalse(VideoPlayerViewModel.isVaultVideoItem(sourceVideo))
+
+        // 3. lockVault() closes Screen.Player & clears Vault mini-player
+        val viewModel = VideoPlayerViewModel(context)
+        viewModel.navigateTo(Screen.Player(video = playable, playlistQueue = listOf(playable)))
+        assertTrue(viewModel.uiState.value.currentScreen is Screen.Player)
+        viewModel.lockVault()
+        assertEquals("lockVault() must close active Vault Screen.Player", Screen.Home, viewModel.uiState.value.currentScreen)
+        assertNull("lockVault() must clear Vault miniPlayerVideo", viewModel.uiState.value.miniPlayerVideo)
+
+        // 4. Non-UTF-8 subtitle charset scoring (Spanish Win-1252, Russian Win-1251, Arabic Win-1256, Chinese GB18030, UTF-8) + manual override + bounded read
+        val spanishText = "1\n00:00:01,000 --> 00:00:04,000\n¡Hola! ¿Cómo estás? Mañana tomaremos café con música española."
+        val spanishWin1252Bytes = spanishText.toByteArray(java.nio.charset.Charset.forName("windows-1252"))
+        val decodedSpanish = com.cyosplay.player.util.SubtitleParser.decodeSubtitleBytesMultiLanguage(
+            spanishWin1252Bytes,
+            preferredEncoding = "AUTO",
+            localeHint = java.util.Locale.US
+        )
+        assertTrue("Spanish Win-1252 must decode cleanly without Chinese/Arabic garble: $decodedSpanish", decodedSpanish.contains("¡Hola! ¿Cómo estás?"))
+
+        val russianText = "1\n00:00:01,000 --> 00:00:04,000\nПривет, как дела? Это субтитры на русском языке для фильма."
+        val russianWin1251Bytes = russianText.toByteArray(java.nio.charset.Charset.forName("windows-1251"))
+        val decodedRussian = com.cyosplay.player.util.SubtitleParser.decodeSubtitleBytesMultiLanguage(
+            russianWin1251Bytes,
+            preferredEncoding = "AUTO",
+            localeHint = java.util.Locale.US
+        )
+        assertTrue("Russian Win-1251 must decode cleanly: $decodedRussian", decodedRussian.contains("Привет, как дела?"))
+
+        val arabicText = "1\n00:00:01,000 --> 00:00:04,000\nمرحبا بكم في هذا الفيلم الرائع والجميل جدا"
+        val arabicWin1256Bytes = arabicText.toByteArray(java.nio.charset.Charset.forName("windows-1256"))
+        val decodedArabic = com.cyosplay.player.util.SubtitleParser.decodeSubtitleBytesMultiLanguage(
+            arabicWin1256Bytes,
+            preferredEncoding = "AUTO",
+            localeHint = java.util.Locale.US
+        )
+        assertTrue("Arabic Win-1256 must decode cleanly: $decodedArabic", decodedArabic.contains("مرحبا بكم في هذا الفيلم"))
+
+        val chineseText = "1\n00:00:01,000 --> 00:00:04,000\n你好世界，欢迎观看高清电影中文字幕测试。"
+        val chineseGbBytes = chineseText.toByteArray(java.nio.charset.Charset.forName("GB18030"))
+        val decodedChinese = com.cyosplay.player.util.SubtitleParser.decodeSubtitleBytesMultiLanguage(
+            chineseGbBytes,
+            preferredEncoding = "AUTO",
+            localeHint = java.util.Locale.US
+        )
+        assertTrue("Chinese GB18030 must decode cleanly: $decodedChinese", decodedChinese.contains("你好世界"))
+
+        val manualRussian = com.cyosplay.player.util.SubtitleParser.decodeSubtitleBytesMultiLanguage(
+            russianWin1251Bytes,
+            preferredEncoding = "windows-1251"
+        )
+        assertTrue(manualRussian.contains("русском языке"))
+
+        // Bounded stream read cap
+        val oversized = ByteArray(1024) { 'A'.code.toByte() }
+        val capped = com.cyosplay.player.util.SubtitleParser.readBoundedBytes(java.io.ByteArrayInputStream(oversized), maxBytes = 256)
+        assertEquals("readBoundedBytes must enforce maxBytes cap", 256, capped.size)
+
+        // 5. HTTPS -> HTTP cross-protocol redirect downgrade disabled & least-privilege runtime permissions
+        assertFalse(
+            "HTTPS -> HTTP cross-protocol redirects must be disabled",
+            com.cyos.player.CyosSmartDataSourceFactory.ALLOW_CROSS_PROTOCOL_REDIRECTS
+        )
+        assertTrue(com.cyos.player.CyosSmartDataSourceFactory.USER_AGENT.contains("1.08rv9"))
+        val api34Perms = com.cyosplay.player.util.AndroidVersionCompatHelper.resolveRuntimeMediaPermissions(34).toSet()
+        assertTrue(api34Perms.contains(android.Manifest.permission.READ_MEDIA_VIDEO))
+        assertFalse("READ_MEDIA_AUDIO must not be requested by video-only player", api34Perms.contains(android.Manifest.permission.READ_MEDIA_AUDIO))
+
+        // 6. RecycleBinRepository cleans up .tmp_<nanoTime> / .dec_tmp_ / .rot_plain_ staging files & releases cleanly
+        val trashDir = File(context.filesDir, "encrypted_recycle_bin").apply { mkdirs() }
+        val staleTrashTmp = File(trashDir, "item.trash.tmp_11111").apply { writeBytes(ByteArray(16) { 9 }) }
+        val staleTrashDec = File(trashDir, "item.dec_tmp_22222").apply { writeBytes(ByteArray(16) { 8 }) }
+        val recycleRepo = com.cyosplay.player.data.repository.RecycleBinRepository(context)
+        assertFalse("RecycleBin must shred .tmp_<nanoTime> files on startup", staleTrashTmp.exists())
+        assertFalse("RecycleBin must shred .dec_tmp_ files on startup", staleTrashDec.exists())
+        recycleRepo.release()
+
+        // Cleanup
+        vaultManager.deleteVaultEntryPermanently(entry.vaultId)
+        vaultManager.release()
+        tempDir.deleteRecursively()
+    }
+
+    @Test
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    fun v108rv8_allFunctionalSecurityAndPerformanceFixes_verified() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+
+        // 1. Unified codecProfileKey across VideoPlayerViewModel, VideoPlayerScreen & MiniPlayerFloatingBar
+        val vmKey = VideoPlayerViewModel.buildCodecProfileKey(
+            decoderEngineMode = DecoderEngineMode.AUTO_HW_PLUS,
+            forceHardwareAccelerationHighBitrate = true,
+            lowRamShieldEnabled = false,
+            batterySaverModeEnabled = true
+        )
+        val holderKey = com.cyos.player.CyosPlayerHolder.buildCodecProfileKey(
+            decoderModeName = DecoderEngineMode.AUTO_HW_PLUS.name,
+            preferSoftwareDecoder = true,
+            forceLowRamMode = false,
+            batterySaverEnabled = true
+        )
+        assertEquals("Codec profile keys must match identically between ViewModel and CyosPlayerHolder", holderKey, vmKey)
+
+        // 2. Network startup bitrate cap is applied before first frame and lifted to Int.MAX_VALUE after first frame
+        val player = com.cyos.player.CyosFastPlayer.createDirectExoPlayer(
+            context = context,
+            capNetworkStartupBitrate = true
+        )
+        try {
+            com.cyos.player.CyosFastPlayer.applyBitratePolicyForUri(player, Uri.parse("https://cdn.example.com/stream.m3u8"))
+            assertEquals(3_500_000, player.trackSelectionParameters.maxVideoBitrate)
+            com.cyos.player.CyosFastPlayer.liftNetworkStartupBitrateCap(player)
+            assertEquals(Int.MAX_VALUE, player.trackSelectionParameters.maxVideoBitrate)
+        } finally {
+            player.release()
+        }
+
+        // 3. Real Chapter Extraction (OGM sidecar, XML sidecar, MP4 chpl box) + Auto-Skip Intro/Credits trigger
+        val chapterTempDir = File(context.cacheDir, "v108rv8_chapters_${System.nanoTime()}").apply { mkdirs() }
+        try {
+            // 3a. OGM sidecar chapters
+            val ogmVideo = File(chapterTempDir, "episode01.mkv").apply { writeBytes(ByteArray(32)) }
+            File(chapterTempDir, "episode01.chapters.txt").writeText(
+                """
+                CHAPTER01=00:00:00.000
+                CHAPTER01NAME=Opening Intro
+                CHAPTER02=00:01:30.000
+                CHAPTER02NAME=Act One
+                CHAPTER03=00:22:00.000
+                CHAPTER03NAME=Ending Credits
+                """.trimIndent()
+            )
+            val ogmChapters = com.cyosplay.player.util.MediaChapterExtractor.extractChaptersForLocalVideo(
+                filePath = ogmVideo.absolutePath,
+                totalDurationMs = 1_440_000L
+            )
+            assertEquals("Must extract 3 OGM sidecar chapters", 3, ogmChapters.size)
+            assertEquals("Opening Intro", ogmChapters[0].title)
+            assertEquals(90_000L, ogmChapters[0].endMs)
+
+            val introWindow = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(
+                totalDurationMs = 1_440_000L,
+                currentPositionMs = 15_000L,
+                chapters = ogmChapters
+            )
+            assertTrue("Must detect Intro window from real chapters", introWindow.isInIntroWindow)
+            assertEquals(90_000L, introWindow.introSkipTargetMs)
+
+            val creditsWindow = com.cyosplay.player.util.PlayerGestureControlHelper.resolveIntroCreditWindow(
+                totalDurationMs = 1_440_000L,
+                currentPositionMs = 1_340_000L,
+                chapters = ogmChapters
+            )
+            assertTrue("Must detect Credits window from real chapters", creditsWindow.isInCreditsWindow)
+
+            // 3b. Matroska XML sidecar chapters
+            val xmlVideo = File(chapterTempDir, "movie_xml.mkv").apply { writeBytes(ByteArray(32)) }
+            File(chapterTempDir, "movie_xml.chapters.xml").writeText(
+                """
+                <Chapters><EditionEntry>
+                  <ChapterAtom>
+                    <ChapterTimeStart>00:00:05.000000000</ChapterTimeStart>
+                    <ChapterTimeEnd>00:01:25.000000000</ChapterTimeEnd>
+                    <ChapterDisplay><ChapterString>Intro Sequence</ChapterString></ChapterDisplay>
+                  </ChapterAtom>
+                </EditionEntry></Chapters>
+                """.trimIndent()
+            )
+            val xmlChapters = com.cyosplay.player.util.MediaChapterExtractor.extractChaptersForLocalVideo(
+                filePath = xmlVideo.absolutePath,
+                totalDurationMs = 600_000L
+            )
+            assertEquals(1, xmlChapters.size)
+            assertEquals(5_000L, xmlChapters[0].startMs)
+            assertEquals(85_000L, xmlChapters[0].endMs)
+
+            // 3c. Embedded MP4 moov -> udta -> chpl binary atom
+            val chplOut = java.io.ByteArrayOutputStream()
+            val chplData = java.io.DataOutputStream(chplOut)
+            chplData.writeInt(0x01000000) // version 1, flags 0
+            chplData.writeInt(0)          // reserved
+            chplData.writeByte(2)         // 2 entries
+            // Entry 1: Intro at 0s
+            chplData.writeLong(0L)
+            val t1 = "Intro".toByteArray(Charsets.UTF_8)
+            chplData.writeByte(t1.size)
+            chplData.write(t1)
+            // Entry 2: Main Feature at 60s (60_000 ms * 10_000 = 600_000_000 in 100ns units)
+            chplData.writeLong(600_000_000L)
+            val t2 = "Main Feature".toByteArray(Charsets.UTF_8)
+            chplData.writeByte(t2.size)
+            chplData.write(t2)
+            val chplPayload = chplOut.toByteArray()
+
+            fun wrapMp4Box(type: String, payload: ByteArray): ByteArray {
+                val out = java.io.ByteArrayOutputStream()
+                val dos = java.io.DataOutputStream(out)
+                dos.writeInt(8 + payload.size)
+                dos.write(type.toByteArray(Charsets.US_ASCII))
+                dos.write(payload)
+                return out.toByteArray()
+            }
+            val mp4File = File(chapterTempDir, "embedded_chpl.mp4")
+            mp4File.writeBytes(wrapMp4Box("moov", wrapMp4Box("udta", wrapMp4Box("chpl", chplPayload))))
+            val mp4Chapters = com.cyosplay.player.util.MediaChapterExtractor.extractChaptersForLocalVideo(
+                filePath = mp4File.absolutePath,
+                totalDurationMs = 300_000L
+            )
+            assertEquals("Must extract 2 embedded MP4 chpl chapters", 2, mp4Chapters.size)
+            assertEquals("Intro", mp4Chapters[0].title)
+            assertEquals(60_000L, mp4Chapters[0].endMs)
+            assertEquals("Main Feature", mp4Chapters[1].title)
+        } finally {
+            chapterTempDir.deleteRecursively()
+        }
+
+        // 4. Real Media3 OpenGL VideoEffects (SmartVideoEffectsFactory)
+        assertTrue(
+            "OFF mode must return empty VideoEffects list for zero GPU overhead",
+            com.cyosplay.player.util.SmartVideoEffectsFactory.createEffectsForMode(
+                com.cyosplay.player.data.model.SmartEnhancementMode.OFF
+            ).isEmpty()
+        )
+        val cinemaEffects = com.cyosplay.player.util.SmartVideoEffectsFactory.createEffectsForMode(
+            com.cyosplay.player.data.model.SmartEnhancementMode.CINEMA_HDR
+        )
+        assertEquals(1, cinemaEffects.size)
+        val matrix = com.cyosplay.player.util.SmartVideoEffectsFactory.buildColorMatrix4x4(
+            com.cyosplay.player.data.model.SmartEnhancementMode.VIVID_AMOLED
+        )
+        assertEquals(16, matrix.size)
+        assertEquals(1f, matrix[15], 0.0001f)
+
+        // 5. VaultChunkedAesGcmDataSource canonical path containment rejects outside & traversal paths
+        val outsideFile = File(context.cacheDir, "outside_secret_${System.nanoTime()}.txt").apply { writeText("secret") }
+        try {
+            assertFalse(
+                "Outside file must fail private vault canonical containment",
+                com.cyos.player.VaultChunkedAesGcmDataSource.isPathContainedInPrivateVault(context, outsideFile)
+            )
+            val traversalFile = File(
+                File(context.filesDir, "private_encrypted_vault"),
+                "../cache/${outsideFile.name}"
+            )
+            assertFalse(
+                "Path traversal with ../ must fail private vault canonical containment",
+                com.cyos.player.VaultChunkedAesGcmDataSource.isPathContainedInPrivateVault(context, traversalFile)
+            )
+            val outsideUri = com.cyos.player.VaultChunkedAesGcmDataSource.buildVaultUri(outsideFile.absolutePath, "leak.mp4")
+            val ds = com.cyos.player.VaultChunkedAesGcmDataSource(context)
+            var containmentRejected = false
+            try {
+                ds.open(androidx.media3.datasource.DataSpec(outsideUri))
+            } catch (_: java.io.IOException) {
+                containmentRejected = true
+            } finally {
+                ds.close()
+            }
+            assertTrue("DataSource.open must throw IOException for paths outside private_encrypted_vault", containmentRejected)
+        } finally {
+            outsideFile.delete()
+        }
+
+        // 6. SettingsRepository partitions non-sensitive UI/playback prefs into plain fastPrefs while keeping Vault PIN encrypted
+        val settingsRepo = com.cyosplay.player.data.repository.SettingsRepository(context)
+        val chosenTheme = com.cyosplay.player.data.model.AppThemeMode.entries.last()
+        settingsRepo.setThemeMode(chosenTheme)
+        settingsRepo.setSavedPlayerBrightness(0.72f)
+        settingsRepo.setVaultPin("654321")
+        val fastPrefs = context.getSharedPreferences(
+            com.cyosplay.player.data.repository.SettingsRepository.FAST_PREFS_NAME,
+            android.content.Context.MODE_PRIVATE
+        )
+        val securePrefs = context.getSharedPreferences(
+            com.cyosplay.player.data.repository.SettingsRepository.SECURE_PREFS_NAME,
+            android.content.Context.MODE_PRIVATE
+        )
+        assertEquals(chosenTheme.name, fastPrefs.getString("theme_mode", null))
+        assertNull("Non-sensitive theme_mode must not stay encrypted in secure prefs", securePrefs.getString("theme_mode", null))
+        val pinToken = securePrefs.getString("vault_pin_token", null)
+        assertNotNull("Vault PIN token must remain in encrypted secure prefs", pinToken)
+        assertFalse("Vault PIN must never be stored in plaintext", pinToken!!.contains("654321"))
+        assertTrue(settingsRepo.verifyVaultPin("654321"))
+
+        // Transparent migration: legacy encrypted non-sensitive key in securePrefs migrates cleanly into fastPrefs
+        fastPrefs.edit().remove("video_sort_option").apply()
+        val legacyEncSort = CryptoSecurityManager.encryptString(
+            context,
+            com.cyosplay.player.data.model.VideoSortOption.SIZE_DESC.name
+        )
+        securePrefs.edit().putString("video_sort_option", legacyEncSort).commit()
+        val freshSettingsRepo = com.cyosplay.player.data.repository.SettingsRepository(context)
+        assertEquals(com.cyosplay.player.data.model.VideoSortOption.SIZE_DESC, freshSettingsRepo.getVideoSortOption())
+        assertEquals(com.cyosplay.player.data.model.VideoSortOption.SIZE_DESC.name, fastPrefs.getString("video_sort_option", null))
+        settingsRepo.release()
+        freshSettingsRepo.release()
+
+        // 7. CyosPlaybackService manifest & 1.08rv9 version identity
+        assertTrue(com.cyos.player.CyosSmartDataSourceFactory.USER_AGENT.contains("1.08rv9"))
+        val viewModel = VideoPlayerViewModel(context)
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
+    }
+
+    @Test
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    fun v108rv9_allAuditFixesAndEnvelopeVault_verified() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+
+        // 1. V4 Envelope Encryption: per-file DEK wrapped by KEK, O(1) instant zero-plaintext KEK header re-wrap,
+        //    payload ciphertext unchanged, wrong KEK rejected, and legacy V3 backwards compatibility + V4 upgrade.
+        val tempDir = File(context.cacheDir, "v108rv9_env_${System.nanoTime()}").apply { mkdirs() }
+        val vaultDir = File(context.filesDir, "private_encrypted_vault").apply { mkdirs() }
+        try {
+            val plainSrc = File(tempDir, "envelope_test.mp4")
+            val originalBytes = ByteArray(262_144 * 2 + 7_777) { idx -> ((idx * 37 + 19) and 0xFF).toByte() }
+            plainSrc.writeBytes(originalBytes)
+
+            val aesKeyGen = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }
+            val kek1 = aesKeyGen.generateKey()
+            val kek2 = aesKeyGen.generateKey()
+            val wrongKek = aesKeyGen.generateKey()
+
+            val v4File = File(vaultDir, "v4_env_${System.nanoTime()}.cyosvault")
+            assertTrue(CryptoSecurityManager.encryptFileToStreamV4WithKek(plainSrc, v4File, kek1))
+            assertTrue("File must have CYOSV4 envelope magic", CryptoSecurityManager.isStreamV4File(v4File))
+            assertTrue("File must satisfy isStreamEncryptedFile", CryptoSecurityManager.isStreamEncryptedFile(v4File))
+
+            val headerInfo = CryptoSecurityManager.readStreamHeader(v4File)
+            assertNotNull("V4 stream header must parse cleanly", headerInfo)
+            val payloadOffset = headerInfo!!.headerSizeBytes.toInt()
+            val payloadBeforeRewrap = v4File.readBytes().copyOfRange(payloadOffset, v4File.length().toInt())
+
+            // Instant O(1) header-only KEK rotation (kek1 -> kek2)
+            assertTrue(CryptoSecurityManager.rewrapStreamV4HeaderInPlace(v4File, kek1, kek2))
+            val payloadAfterRewrap = v4File.readBytes().copyOfRange(payloadOffset, v4File.length().toInt())
+            assertArrayEquals(
+                "O(1) KEK header re-wrap must leave encrypted video chunk payload untouched",
+                payloadBeforeRewrap,
+                payloadAfterRewrap
+            )
+
+            // Old KEK and wrong KEK must be rejected; new KEK decrypts byte-for-byte identically
+            assertFalse("Old KEK must fail after header re-wrap", CryptoSecurityManager.verifyEncryptedFileIntegrityWithKey(v4File, kek1))
+            assertFalse("Wrong KEK must fail", CryptoSecurityManager.verifyEncryptedFileIntegrityWithKey(v4File, wrongKek))
+            assertTrue("New KEK must pass integrity verification", CryptoSecurityManager.verifyEncryptedFileIntegrityWithKey(v4File, kek2))
+
+            val decryptedV4 = File(tempDir, "v4_decrypted.mp4")
+            assertTrue(CryptoSecurityManager.decryptFileFromDiskWithKey(v4File, decryptedV4, kek2))
+            assertArrayEquals("Decrypted V4 output must match original bytes", originalBytes, decryptedV4.readBytes())
+            v4File.delete()
+
+            // Legacy V3 file backwards compatibility & transparent upgrade to V4 on re-encryption
+            val legacyV3File = File(vaultDir, "legacy_v3_${System.nanoTime()}.cyosvault")
+            assertTrue(CryptoSecurityManager.encryptFileToDiskV3WithKey(plainSrc, legacyV3File, kek1))
+            assertTrue(CryptoSecurityManager.isStreamV3File(legacyV3File))
+            assertTrue(CryptoSecurityManager.isStreamEncryptedFile(legacyV3File))
+            assertTrue(CryptoSecurityManager.verifyEncryptedFileIntegrityWithKey(legacyV3File, kek1))
+            assertTrue(CryptoSecurityManager.reEncryptFileOnDisk(legacyV3File, kek1, kek2))
+            assertTrue("Rotated legacy V3 file should upgrade to V4 envelope", CryptoSecurityManager.isStreamV4File(legacyV3File))
+            assertTrue(CryptoSecurityManager.verifyEncryptedFileIntegrityWithKey(legacyV3File, kek2))
+            legacyV3File.delete()
+
+            // 2. JSONObject-safe manifest signing (handles quotes and backslashes cleanly)
+            val trickyFile = File(tempDir, "clip_\"quoted\"_\\slash.mp4").apply { writeBytes(ByteArray(64) { 7 }) }
+            val signedManifest = CryptoSecurityManager.signMediaFileWithKeystore(trickyFile)
+            assertEquals(trickyFile.name, signedManifest.filename)
+            val sigJsonFile = File(tempDir, "${trickyFile.name}.sig.json")
+            assertTrue("Companion .sig.json manifest must be written", sigJsonFile.exists())
+            val parsedManifest = org.json.JSONObject(sigJsonFile.readText())
+            assertEquals(trickyFile.name, parsedManifest.getString("filename"))
+            assertEquals("SHA256withRSA", parsedManifest.getString("algorithm"))
+            assertEquals(64, parsedManifest.getString("sha256").length)
+        } finally {
+            tempDir.deleteRecursively()
+        }
+
+        // 3. Session-only decoder fallback does NOT overwrite user's saved SettingsRepository decoder mode
+        val viewModel = VideoPlayerViewModel(context)
+        viewModel.setDecoderEngineMode(DecoderEngineMode.HW_PLUS)
+        assertEquals(DecoderEngineMode.HW_PLUS, viewModel.settingsRepository.getDecoderEngineMode())
+        val fallbackMode = viewModel.fallbackToNextDecoderEngine()
+        assertNotNull("HW+ must advance to next session fallback mode", fallbackMode)
+        assertEquals(fallbackMode, viewModel.uiState.value.decoderEngineMode)
+        assertEquals(
+            "Session decoder fallback must preserve persisted SettingsRepository mode",
+            DecoderEngineMode.HW_PLUS,
+            viewModel.settingsRepository.getDecoderEngineMode()
+        )
+
+        // 4. switchActivePlaylistVideo updates Screen.Player, clears stale chapters, and accepts runtime chapters for video #2
+        val video1 = VideoItem(
+            id = 101L,
+            title = "Episode 1",
+            displayName = "ep1.mkv",
+            uri = Uri.parse("file:///storage/emulated/0/Movies/ep1.mkv"),
+            path = "/storage/emulated/0/Movies/ep1.mkv",
+            sizeBytes = 100_000L,
+            durationMs = 1_200_000L,
+            dateModifiedSeconds = 1000L,
+            width = 1920,
+            height = 1080,
+            mimeType = "video/x-matroska",
+            folderId = "movies",
+            folderName = "Movies",
+            folderPath = "/storage/emulated/0/Movies"
+        )
+        val video2 = video1.copy(
+            id = 102L,
+            title = "Episode 2",
+            displayName = "ep2.mkv",
+            uri = Uri.parse("file:///storage/emulated/0/Movies/ep2.mkv"),
+            path = "/storage/emulated/0/Movies/ep2.mkv"
+        )
+        viewModel.navigateTo(Screen.Player(video = video1, playlistQueue = listOf(video1, video2)))
+        viewModel.mergeRuntimeChapters(
+            video1.path,
+            listOf(com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Opening Intro", 0L, 90_000L))
+        )
+        assertEquals(1, viewModel.uiState.value.activeVideoChapters.size)
+        viewModel.switchActivePlaylistVideo(video2, listOf(video1, video2))
+        val playerScreen = viewModel.uiState.value.currentScreen as? Screen.Player
+        assertNotNull(playerScreen)
+        assertEquals(video2.path, playerScreen!!.video.path)
+        assertTrue("Switching playlist video must clear previous video's chapters", viewModel.uiState.value.activeVideoChapters.isEmpty())
+        viewModel.mergeRuntimeChapters(
+            video2.path,
+            listOf(com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment("Intro", 10_000L, 95_000L))
+        )
+        assertEquals("Runtime chapters for video #2 must be accepted after switch", 1, viewModel.uiState.value.activeVideoChapters.size)
+
+        // 5. High volume & brightness warning requires BOTH volume >= 85% AND brightness >= 85%
+        assertFalse(
+            "Bright screen alone with low volume must NOT trigger warning",
+            com.cyosplay.player.util.PlayerGestureControlHelper.isHighVolumeAndBrightnessDetected(0.30f, 0.95f)
+        )
+        assertFalse(
+            "Loud volume alone with dim screen must NOT trigger warning",
+            com.cyosplay.player.util.PlayerGestureControlHelper.isHighVolumeAndBrightnessDetected(0.95f, 0.30f)
+        )
+        assertTrue(
+            "Both volume >= 85% and brightness >= 85% must trigger warning",
+            com.cyosplay.player.util.PlayerGestureControlHelper.isHighVolumeAndBrightnessDetected(0.90f, 0.90f)
+        )
+
+        // 6. Eac3DownmixAudioProcessor bypasses standard stereo 16-bit PCM at unity gain (zero CPU copy),
+        //    while remaining active for 5.1 surround or boosted/night-mode audio.
+        val audioProcessor = com.cyosplay.player.util.Eac3DownmixAudioProcessor()
+        audioProcessor.volumeBoostMultiplier = 1.0f
+        audioProcessor.nightModeCompressionEnabled = false
+        val stereo16Format = androidx.media3.common.audio.AudioProcessor.AudioFormat(48_000, 2, androidx.media3.common.C.ENCODING_PCM_16BIT)
+        audioProcessor.configure(stereo16Format)
+        assertFalse("Standard stereo 16-bit unity PCM must bypass downmix processor", audioProcessor.isActive)
+
+        val surroundFormat = androidx.media3.common.audio.AudioProcessor.AudioFormat(48_000, 6, androidx.media3.common.C.ENCODING_PCM_16BIT)
+        val outSurround = audioProcessor.configure(surroundFormat)
+        assertTrue("5.1 surround must activate downmix processor", audioProcessor.isActive)
+        assertEquals("5.1 surround must downmix to stereo", 2, outSurround.channelCount)
+
+        audioProcessor.volumeBoostMultiplier = 1.5f
+        audioProcessor.configure(stereo16Format)
+        assertTrue("Boosted stereo must activate processor", audioProcessor.isActive)
+
+        // 7. MemoryManager enforces strict byte buffer caps across RAM tiers
+        val memBudget = com.cyosplay.player.util.MemoryManager.detectMemoryBudget(context)
+        assertFalse("Low-RAM Shield must enforce targetBufferBytes cap", memBudget.prioritizeTimeOverSizeThresholds)
+
+        // 8. SmartVideoEffectsFactory wires Clarity Boost slider into GPU RGB matrix
+        val clarityEffects = com.cyosplay.player.util.SmartVideoEffectsFactory.createEffectsForMode(
+            mode = com.cyosplay.player.data.model.SmartEnhancementMode.OFF,
+            clarityBoost = 0.6f
+        )
+        assertEquals("Non-zero Clarity Boost must emit an OpenGL VideoEffect even when preset is OFF", 1, clarityEffects.size)
+        val identityMatrix = com.cyosplay.player.util.SmartVideoEffectsFactory.buildColorMatrix4x4(
+            com.cyosplay.player.data.model.SmartEnhancementMode.OFF,
+            clarityBoost = 0f
+        )
+        val boostedMatrix = com.cyosplay.player.util.SmartVideoEffectsFactory.buildColorMatrix4x4(
+            com.cyosplay.player.data.model.SmartEnhancementMode.OFF,
+            clarityBoost = 0.6f
+        )
+        assertFalse("Clarity Boost matrix must differ from identity", identityMatrix.contentEquals(boostedMatrix))
+
+        // 9. MiniPlayerPositionPreset viewport-adaptive offset resolution & case-insensitive volume lookup
+        val (topRightX, topRightY) = com.cyosplay.player.data.model.MiniPlayerPositionPreset.TOP_RIGHT.resolveOffsetPx(100f, 400f)
+        assertEquals(100f, topRightX, 0.01f)
+        assertEquals(-400f, topRightY, 0.01f)
+        val caseMap = mapOf("/storage/emulated/0/Movies/Clip.mp4" to 0.65f)
+        assertEquals(
+            0.65f,
+            VideoPlayerViewModel.lookupFloatSettingCaseInsensitive(caseMap, "/storage/emulated/0/movies/clip.mp4")!!,
+            0.001f
+        )
+
+        // 10. Event-driven external subtitle transition scheduler helper
+        val sampleCues = listOf(
+            com.cyosplay.player.data.model.SubtitleCueItem(1, 1_000L, 3_000L, "Hello"),
+            com.cyosplay.player.data.model.SubtitleCueItem(2, 5_000L, 8_000L, "World")
+        )
+        assertEquals(1_000L, com.cyosplay.player.util.SubtitleParser.findNextSubtitleEventTimeMs(sampleCues, 0L))
+        assertEquals(3_001L, com.cyosplay.player.util.SubtitleParser.findNextSubtitleEventTimeMs(sampleCues, 1_500L))
+        assertEquals(5_000L, com.cyosplay.player.util.SubtitleParser.findNextSubtitleEventTimeMs(sampleCues, 3_500L))
+        assertNull(com.cyosplay.player.util.SubtitleParser.findNextSubtitleEventTimeMs(sampleCues, 9_000L))
+
+        // 11. Neutral 0ms default subtitle cadence offset & 1.08rv9 version identity
+        assertEquals(0L, com.cyosplay.player.util.SubtitleAudioSyncEngine.computeLanguagePatternOffsetMs("en", listOf("en"), 44100))
+        assertEquals(0L, com.cyosplay.player.util.SubtitleAudioSyncEngine.computeLanguagePatternOffsetMs("ja", listOf("en"), 48000))
+        assertEquals("1.08rv9", viewModel.uiState.value.appVersionName)
+        assertEquals("CyosPlay 1.08rv9", viewModel.uiState.value.appDescription)
+        assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
+        assertTrue(com.cyos.player.CyosSmartDataSourceFactory.USER_AGENT.contains("1.08rv9"))
     }
 }

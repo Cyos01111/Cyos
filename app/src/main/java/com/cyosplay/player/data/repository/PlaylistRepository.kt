@@ -21,6 +21,10 @@ class PlaylistRepository(private val context: Context) {
         CryptoSecurityManager.registerRotationListener(rotationListener)
     }
 
+    fun release() {
+        CryptoSecurityManager.unregisterRotationListener(rotationListener)
+    }
+
     @Synchronized
     private fun reEncryptStore(oldKey: SecretKey, newKey: SecretKey) {
         val editor = prefs.edit()
@@ -122,7 +126,7 @@ class PlaylistRepository(private val context: Context) {
             )
         }
         val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-        prefs.edit().putString(KEY_PLAYLISTS_ENC, cipher).commit()
+        prefs.edit().putString(KEY_PLAYLISTS_ENC, cipher).apply()
     }
 
     fun getFavoriteVideoPaths(): Set<String> {
@@ -151,7 +155,7 @@ class PlaylistRepository(private val context: Context) {
         val arr = JSONArray()
         current.forEach { arr.put(it) }
         val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-        prefs.edit().putString(KEY_FAVORITES_ENC, cipher).commit()
+        prefs.edit().putString(KEY_FAVORITES_ENC, cipher).apply()
         return current
     }
 
@@ -170,7 +174,7 @@ class PlaylistRepository(private val context: Context) {
             val arr = JSONArray()
             favs.forEach { arr.put(it) }
             val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-            prefs.edit().putString(KEY_FAVORITES_ENC, cipher).commit()
+            prefs.edit().putString(KEY_FAVORITES_ENC, cipher).apply()
         }
 
         val currentPlaylists = getPlaylists()
@@ -214,7 +218,7 @@ class PlaylistRepository(private val context: Context) {
             val arr = JSONArray()
             favs.forEach { arr.put(it) }
             val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-            prefs.edit().putString(KEY_FAVORITES_ENC, cipher).commit()
+            prefs.edit().putString(KEY_FAVORITES_ENC, cipher).apply()
         }
 
         val currentPlaylists = getPlaylists()

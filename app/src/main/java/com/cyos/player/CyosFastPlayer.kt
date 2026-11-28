@@ -135,7 +135,7 @@ object CyosFastPlayer {
             )
             .setBackBuffer(backBuf, true)
             .setTargetBufferBytes(targetBytes)
-            .setPrioritizeTimeOverSizeThresholds(true)
+            .setPrioritizeTimeOverSizeThresholds(false)
             .build()
     }
 
@@ -147,7 +147,7 @@ object CyosFastPlayer {
     ): DefaultRenderersFactory {
         val appContext = context.applicationContext ?: context
         val factory = NextRenderersFactory(appContext, customAudioProcessors)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             factory.forceEnableMediaCodecAsynchronousQueueing()
         }
         factory.setEnableDecoderFallback(true)
@@ -190,6 +190,18 @@ object CyosFastPlayer {
             paramsBuilder.setMaxVideoBitrate(Int.MAX_VALUE)
         }
         selector.parameters = paramsBuilder.build()
+    }
+
+    /**
+     * Lifts the initial 3.5 Mbps fast-start bitrate cap once the first video frame renders so
+     * adaptive HTTP/HTTPS/RTSP streams can ramp freely up to 1080p60 / 4K / 8K quality.
+     */
+    fun liftNetworkStartupBitrateCap(player: ExoPlayer) {
+        val selector = player.trackSelector as? DefaultTrackSelector ?: return
+        if (selector.parameters.maxVideoBitrate == Int.MAX_VALUE) return
+        selector.parameters = selector.buildUponParameters()
+            .setMaxVideoBitrate(Int.MAX_VALUE)
+            .build()
     }
 
     fun createDirectMediaSourceFactory(
@@ -245,6 +257,13 @@ object CyosFastPlayer {
             .apply {
                 videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
             }
+    }
+
+    fun setWakeModeForBackgroundAudio(player: ExoPlayer?, enabled: Boolean) {
+        if (player == null) return
+        runCatching {
+            player.setWakeMode(if (enabled) C.WAKE_MODE_LOCAL else C.WAKE_MODE_NONE)
+        }
     }
 
     fun playOnTap(

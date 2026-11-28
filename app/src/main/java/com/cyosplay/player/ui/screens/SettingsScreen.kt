@@ -395,10 +395,6 @@ fun SettingsScreen(
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(10.dp))
 
-                Spacer(modifier = Modifier.height(10.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(10.dp))
-
                 // Item 8: Auto-Skip Intros & Credits
                 Row(
                     modifier = Modifier.fillMaxWidth(),

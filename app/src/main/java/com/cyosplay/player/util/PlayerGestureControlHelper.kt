@@ -96,8 +96,8 @@ object PlayerGestureControlHelper {
         recentlyPinched: Boolean = false,
         isDoubleTapSkipActive: Boolean = false
     ): Boolean {
-        return isPlaying &&
-            !isControlsLocked &&
+        // Allow vertical brightness & volume gestures both while playing and while paused
+        return !isControlsLocked &&
             !isInPipMode &&
             activePointerCount == 1 &&
             !isHoldFastForwardActive &&
@@ -473,15 +473,23 @@ object PlayerGestureControlHelper {
         val creditsSkipTargetMs: Long
     )
 
+    data class ChapterSegment(
+        val title: String,
+        val startMs: Long,
+        val endMs: Long
+    )
+
     /**
      * Evaluates whether the current playback position is inside an Intro or Credits segment
-     * and computes the exact target timestamp to skip to.
+     * strictly using real embedded or sidecar chapter metadata. Never fabricates arbitrary
+     * intro or credits timestamps when chapter metadata is absent.
      */
     fun resolveIntroCreditWindow(
         totalDurationMs: Long,
-        currentPositionMs: Long
+        currentPositionMs: Long,
+        chapters: List<ChapterSegment> = emptyList()
     ): IntroCreditWindowInfo {
-        if (totalDurationMs < 120_000L || currentPositionMs < 0L) {
+        if (totalDurationMs <= 0L || currentPositionMs < 0L || chapters.isEmpty()) {
             return IntroCreditWindowInfo(
                 isInIntroWindow = false,
                 isInCreditsWindow = false,
@@ -489,41 +497,54 @@ object PlayerGestureControlHelper {
                 creditsSkipTargetMs = totalDurationMs.coerceAtLeast(0L)
             )
         }
-        val introStartMs = 3_000L
-        val introEndMs = minOf(85_000L, (totalDurationMs * 0.16f).toLong().coerceAtLeast(18_000L))
-        val inIntro = currentPositionMs in introStartMs until (introEndMs - 1_500L)
+        val safePos = currentPositionMs.coerceIn(0L, totalDurationMs)
+        val activeChapter = chapters.firstOrNull { ch ->
+            safePos >= ch.startMs && safePos < ch.endMs && ch.endMs > ch.startMs
+        } ?: return IntroCreditWindowInfo(
+            isInIntroWindow = false,
+            isInCreditsWindow = false,
+            introSkipTargetMs = 0L,
+            creditsSkipTargetMs = totalDurationMs.coerceAtLeast(0L)
+        )
 
-        val hasCreditsSegment = totalDurationMs >= 180_000L
-        val creditsDurationMs = minOf(75_000L, (totalDurationMs * 0.12f).toLong().coerceAtLeast(20_000L))
-        val creditsStartMs = (totalDurationMs - creditsDurationMs).coerceAtLeast(introEndMs + 15_000L)
-        val creditsEndMs = (totalDurationMs - 1_000L).coerceAtLeast(0L)
-        val inCredits = hasCreditsSegment && currentPositionMs in creditsStartMs until (totalDurationMs - 3_000L)
+        val lowerTitle = activeChapter.title.lowercase(java.util.Locale.US)
+        val isIntroChapter = lowerTitle.contains("intro") ||
+            lowerTitle.contains("opening") ||
+            lowerTitle.contains("recap") ||
+            lowerTitle.contains("prologue") ||
+            lowerTitle == "op"
+        val isCreditsChapter = lowerTitle.contains("credit") ||
+            lowerTitle.contains("ending") ||
+            lowerTitle.contains("outro") ||
+            lowerTitle.contains("epilogue") ||
+            lowerTitle == "ed"
 
+        val skipTarget = activeChapter.endMs.coerceIn(0L, totalDurationMs)
         return IntroCreditWindowInfo(
-            isInIntroWindow = inIntro,
-            isInCreditsWindow = inCredits,
-            introSkipTargetMs = introEndMs,
-            creditsSkipTargetMs = creditsEndMs
+            isInIntroWindow = isIntroChapter && skipTarget > safePos,
+            isInCreditsWindow = isCreditsChapter && skipTarget > safePos,
+            introSkipTargetMs = if (isIntroChapter) skipTarget else 0L,
+            creditsSkipTargetMs = if (isCreditsChapter) skipTarget else totalDurationMs.coerceAtLeast(0L)
         )
     }
 
     const val HIGH_VOLUME_BRIGHTNESS_THRESHOLD = 0.85f
     const val SAFE_LOWERED_VOLUME_BRIGHTNESS = 0.50f
     const val HIGH_VOLUME_AND_BRIGHTNESS_WARNING_TEXT =
-        "High volume and screen brightness detected. Lowering both helps protect your hearing, reduce eye strain, and save battery."
+        "High volume and screen brightness detected (≥85%). Tap Lower Both to drop both to 50% for eye/ear comfort and battery savings."
 
     data class AutoSafeVolumeBrightnessResult(
         val triggeredWarningAndAuto50: Boolean,
         val safeVolume: Float,
-        val safeBrightness: Float
+        val safeBrightness: Float,
+        val autoLoweredToSafe50: Boolean = false
     ) {
-        val autoLoweredToSafe50: Boolean get() = triggeredWarningAndAuto50
         val volumeFraction: Float get() = safeVolume
         val brightnessFraction: Float get() = safeBrightness
     }
 
     /**
-     * Returns true whenever either player volume OR screen brightness reaches or exceeds
+     * Returns true when BOTH player volume AND screen brightness reach or exceed
      * the 85% threshold (0.85f) and audio is not muted.
      */
     fun isHighVolumeAndBrightnessDetected(
@@ -534,12 +555,13 @@ object PlayerGestureControlHelper {
         if (isMuted) return false
         val safeVol = sanitizeVolume(volumeFraction)
         val safeBri = sanitizeBrightness(brightnessFraction)
-        return safeVol >= HIGH_VOLUME_BRIGHTNESS_THRESHOLD || safeBri >= HIGH_VOLUME_BRIGHTNESS_THRESHOLD
+        return safeVol >= HIGH_VOLUME_BRIGHTNESS_THRESHOLD && safeBri >= HIGH_VOLUME_BRIGHTNESS_THRESHOLD
     }
 
     /**
-     * Enforces automatic reduction to 50% (0.50f) whenever either volume or screen brightness
-     * reaches or exceeds 85% (0.85f).
+     * Non-destructive safety check: detects when both volume and screen brightness
+     * reach or exceed 85% (0.85f) so the UI displays a warning banner with a "Lower Both"
+     * button, without forcibly snapping the user's sliders down.
      */
     fun enforceAutoSafeVolumeAndBrightness(
         volumeFraction: Float,
@@ -549,18 +571,11 @@ object PlayerGestureControlHelper {
         val safeVol = sanitizeVolume(volumeFraction)
         val safeBri = sanitizeBrightness(brightnessFraction)
         val exceeded = isHighVolumeAndBrightnessDetected(safeVol, safeBri, isMuted)
-        return if (exceeded) {
-            AutoSafeVolumeBrightnessResult(
-                triggeredWarningAndAuto50 = true,
-                safeVolume = SAFE_LOWERED_VOLUME_BRIGHTNESS,
-                safeBrightness = SAFE_LOWERED_VOLUME_BRIGHTNESS
-            )
-        } else {
-            AutoSafeVolumeBrightnessResult(
-                triggeredWarningAndAuto50 = false,
-                safeVolume = safeVol,
-                safeBrightness = safeBri
-            )
-        }
+        return AutoSafeVolumeBrightnessResult(
+            triggeredWarningAndAuto50 = exceeded,
+            safeVolume = safeVol,
+            safeBrightness = safeBri,
+            autoLoweredToSafe50 = false
+        )
     }
 }

@@ -1,5 +1,6 @@
 package com.cyosplay.player.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -138,6 +139,17 @@ fun FolderListScreen(
     val searchFocusRequester = remember { FocusRequester() }
     var showSortMenu by remember { mutableStateOf(false) }
     var showTopMoreMenu by remember { mutableStateOf(false) }
+
+    val shouldInterceptBack = uiState.isSelectionModeActive ||
+        uiState.searchQuery.isNotBlank() ||
+        uiState.currentNavTab != NavDestination.FOLDERS
+    BackHandler(enabled = shouldInterceptBack) {
+        when {
+            uiState.isSelectionModeActive -> viewModel.clearSelection()
+            uiState.searchQuery.isNotBlank() -> viewModel.updateSearchQuery("")
+            uiState.currentNavTab != NavDestination.FOLDERS -> viewModel.selectNavTab(NavDestination.FOLDERS)
+        }
+    }
 
     val foldersListState = rememberLazyListState(
         initialFirstVisibleItemIndex = uiState.foldersListFirstVisibleIndex,

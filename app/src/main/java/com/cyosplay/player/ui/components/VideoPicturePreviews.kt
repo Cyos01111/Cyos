@@ -1,8 +1,11 @@
 package com.cyosplay.player.ui.components
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.util.LruCache
+import android.util.Size as AndroidSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -56,6 +59,8 @@ import com.cyosplay.player.ui.theme.ElectricCyan
 import com.cyosplay.player.ui.theme.EmeraldVault
 import com.cyosplay.player.util.Formatters
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.abs
@@ -65,6 +70,7 @@ import kotlin.math.abs
  */
 object VideoFrameThumbnailCache {
     private val cache = object : LruCache<String, ImageBitmap>(32) {}
+    private val decodeSemaphore = Semaphore(permits = 2)
 
     @Synchronized
     fun get(path: String): ImageBitmap? = cache.get(path)
@@ -79,6 +85,94 @@ object VideoFrameThumbnailCache {
         cache.evictAll()
     }
 
+    private fun toCompactImageBitmap(rawBitmap: Bitmap?): ImageBitmap? {
+        val src = rawBitmap ?: return null
+        val rgb565Bitmap = if (src.config != Bitmap.Config.RGB_565) {
+            val converted = src.copy(Bitmap.Config.RGB_565, false)
+            if (converted != null && converted !== src) {
+                src.recycle()
+            }
+            converted ?: src
+        } else {
+            src
+        }
+        return rgb565Bitmap.asImageBitmap()
+    }
+
+    suspend fun extractVideoFrameBitmap(
+        context: Context,
+        video: VideoItem,
+        targetWidthPx: Int = 280,
+        targetHeightPx: Int = 158
+    ): ImageBitmap? {
+        val cacheKey = video.path.ifBlank { video.uri.toString() }
+        get(cacheKey)?.let { return it }
+
+        return decodeSemaphore.withPermit {
+            get(cacheKey)?.let { return@withPermit it }
+            withContext(Dispatchers.IO) {
+                val appContext = context.applicationContext ?: context
+                // 1. Scoped-Storage native thumbnail loading on API 29+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    video.uri.scheme.equals("content", ignoreCase = true)
+                ) {
+                    val loaded = runCatching {
+                        appContext.contentResolver.loadThumbnail(
+                            video.uri,
+                            AndroidSize(targetWidthPx, targetHeightPx),
+                            null
+                        )
+                    }.getOrNull()
+                    toCompactImageBitmap(loaded)?.let { img ->
+                        put(cacheKey, img)
+                        return@withContext img
+                    }
+                }
+
+                // 2. Fallback to MediaMetadataRetriever via ContentResolver URI first, then File path
+                val retriever = MediaMetadataRetriever()
+                try {
+                    var sourceBound = false
+                    if (video.uri.scheme.equals("content", ignoreCase = true)) {
+                        sourceBound = runCatching {
+                            retriever.setDataSource(appContext, video.uri)
+                            true
+                        }.getOrDefault(false)
+                    }
+                    if (!sourceBound) {
+                        val file = File(video.path)
+                        if (!file.exists() || !file.isFile || file.length() <= 512L) {
+                            return@withContext null
+                        }
+                        retriever.setDataSource(file.absolutePath)
+                    }
+                    val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull() ?: 0L
+                    val frameTimeUs = if (durationMs > 4_000L) 2_000_000L else (durationMs * 250L).coerceAtLeast(0L)
+                    val rawBitmap: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        retriever.getScaledFrameAtTime(
+                            frameTimeUs,
+                            MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                            targetWidthPx,
+                            targetHeightPx
+                        )
+                    } else {
+                        retriever.getFrameAtTime(frameTimeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    }
+                    toCompactImageBitmap(rawBitmap)?.also { img ->
+                        put(cacheKey, img)
+                    }
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    try {
+                        retriever.release()
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
     fun extractVideoFrameBitmap(path: String, targetWidthPx: Int = 280, targetHeightPx: Int = 158): ImageBitmap? {
         get(path)?.let { return it }
         val file = File(path)
@@ -91,7 +185,7 @@ object VideoFrameThumbnailCache {
             val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull() ?: 0L
             val frameTimeUs = if (durationMs > 4_000L) 2_000_000L else (durationMs * 250L).coerceAtLeast(0L)
-            val rawBitmap: Bitmap? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            val rawBitmap: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 retriever.getScaledFrameAtTime(
                     frameTimeUs,
                     MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
@@ -101,18 +195,7 @@ object VideoFrameThumbnailCache {
             } else {
                 retriever.getFrameAtTime(frameTimeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
             }
-            val rgb565Bitmap = rawBitmap?.let { src ->
-                if (src.config != Bitmap.Config.RGB_565) {
-                    val converted = src.copy(Bitmap.Config.RGB_565, false)
-                    if (converted != null && converted !== src) {
-                        src.recycle()
-                    }
-                    converted ?: src
-                } else {
-                    src
-                }
-            }
-            rgb565Bitmap?.asImageBitmap()?.also { img ->
+            toCompactImageBitmap(rawBitmap)?.also { img ->
                 put(path, img)
             }
         } catch (_: Throwable) {
@@ -241,15 +324,14 @@ private fun SingleVideoFrameCanvasOrBitmap(
     compactQuadrant: Boolean = false
 ) {
     val context = LocalContext.current
-    var frameBitmap by remember(video.path) {
-        mutableStateOf(VideoFrameThumbnailCache.get(video.path))
+    val cacheKey = video.path.ifBlank { video.uri.toString() }
+    var frameBitmap by remember(cacheKey) {
+        mutableStateOf(VideoFrameThumbnailCache.get(cacheKey))
     }
 
-    LaunchedEffect(video.path) {
+    LaunchedEffect(cacheKey) {
         if (frameBitmap == null) {
-            val extracted = withContext(Dispatchers.IO) {
-                VideoFrameThumbnailCache.extractVideoFrameBitmap(video.path)
-            }
+            val extracted = VideoFrameThumbnailCache.extractVideoFrameBitmap(context, video)
             if (extracted != null) {
                 frameBitmap = extracted
             }

@@ -28,30 +28,30 @@ object SubtitleAudioSyncEngine {
     private val LANGUAGE_PROFILES: Map<String, AudioLanguageSyncProfile> = mapOf(
         "en" to AudioLanguageSyncProfile("en", "English", 0L, 0L),
         "eng" to AudioLanguageSyncProfile("en", "English", 0L, 0L),
-        "ja" to AudioLanguageSyncProfile("ja", "Japanese", -40L, -60L),
-        "jpn" to AudioLanguageSyncProfile("ja", "Japanese", -40L, -60L),
-        "ko" to AudioLanguageSyncProfile("ko", "Korean", -35L, -50L),
-        "kor" to AudioLanguageSyncProfile("ko", "Korean", -35L, -50L),
-        "zh" to AudioLanguageSyncProfile("zh", "Chinese", -30L, -45L),
-        "chi" to AudioLanguageSyncProfile("zh", "Chinese", -30L, -45L),
-        "zho" to AudioLanguageSyncProfile("zh", "Chinese", -30L, -45L),
-        "es" to AudioLanguageSyncProfile("es", "Spanish", -20L, -30L),
-        "spa" to AudioLanguageSyncProfile("es", "Spanish", -20L, -30L),
-        "fr" to AudioLanguageSyncProfile("fr", "French", -20L, -30L),
-        "fra" to AudioLanguageSyncProfile("fr", "French", -20L, -30L),
-        "de" to AudioLanguageSyncProfile("de", "German", 15L, 25L),
-        "deu" to AudioLanguageSyncProfile("de", "German", 15L, 25L),
-        "ger" to AudioLanguageSyncProfile("de", "German", 15L, 25L),
-        "hi" to AudioLanguageSyncProfile("hi", "Hindi", -25L, -40L),
-        "hin" to AudioLanguageSyncProfile("hi", "Hindi", -25L, -40L),
-        "ar" to AudioLanguageSyncProfile("ar", "Arabic", -25L, -35L),
-        "ara" to AudioLanguageSyncProfile("ar", "Arabic", -25L, -35L),
-        "ru" to AudioLanguageSyncProfile("ru", "Russian", 10L, 20L),
-        "rus" to AudioLanguageSyncProfile("ru", "Russian", 10L, 20L),
-        "pt" to AudioLanguageSyncProfile("pt", "Portuguese", -15L, -25L),
-        "por" to AudioLanguageSyncProfile("pt", "Portuguese", -15L, -25L),
-        "it" to AudioLanguageSyncProfile("it", "Italian", -15L, -25L),
-        "ita" to AudioLanguageSyncProfile("it", "Italian", -15L, -25L)
+        "ja" to AudioLanguageSyncProfile("ja", "Japanese", 0L, 0L),
+        "jpn" to AudioLanguageSyncProfile("ja", "Japanese", 0L, 0L),
+        "ko" to AudioLanguageSyncProfile("ko", "Korean", 0L, 0L),
+        "kor" to AudioLanguageSyncProfile("ko", "Korean", 0L, 0L),
+        "zh" to AudioLanguageSyncProfile("zh", "Chinese", 0L, 0L),
+        "chi" to AudioLanguageSyncProfile("zh", "Chinese", 0L, 0L),
+        "zho" to AudioLanguageSyncProfile("zh", "Chinese", 0L, 0L),
+        "es" to AudioLanguageSyncProfile("es", "Spanish", 0L, 0L),
+        "spa" to AudioLanguageSyncProfile("es", "Spanish", 0L, 0L),
+        "fr" to AudioLanguageSyncProfile("fr", "French", 0L, 0L),
+        "fra" to AudioLanguageSyncProfile("fr", "French", 0L, 0L),
+        "de" to AudioLanguageSyncProfile("de", "German", 0L, 0L),
+        "deu" to AudioLanguageSyncProfile("de", "German", 0L, 0L),
+        "ger" to AudioLanguageSyncProfile("de", "German", 0L, 0L),
+        "hi" to AudioLanguageSyncProfile("hi", "Hindi", 0L, 0L),
+        "hin" to AudioLanguageSyncProfile("hi", "Hindi", 0L, 0L),
+        "ar" to AudioLanguageSyncProfile("ar", "Arabic", 0L, 0L),
+        "ara" to AudioLanguageSyncProfile("ar", "Arabic", 0L, 0L),
+        "ru" to AudioLanguageSyncProfile("ru", "Russian", 0L, 0L),
+        "rus" to AudioLanguageSyncProfile("ru", "Russian", 0L, 0L),
+        "pt" to AudioLanguageSyncProfile("pt", "Portuguese", 0L, 0L),
+        "por" to AudioLanguageSyncProfile("pt", "Portuguese", 0L, 0L),
+        "it" to AudioLanguageSyncProfile("it", "Italian", 0L, 0L),
+        "ita" to AudioLanguageSyncProfile("it", "Italian", 0L, 0L)
     )
 
     /**
@@ -90,8 +90,8 @@ object SubtitleAudioSyncEngine {
     }
 
     /**
-     * Computes the automatic subtitle timestamp alignment offset (in milliseconds) by matching
-     * the detected audio language pattern with the selected subtitle track languages.
+     * Computes the default subtitle alignment offset (neutral 0 ms so properly authored subtitles
+     * stay frame-accurate without artificial negative shifts; users can adjust via manual fine-tune).
      */
     fun computeLanguagePatternOffsetMs(
         detectedAudioLanguage: String?,
@@ -100,25 +100,14 @@ object SubtitleAudioSyncEngine {
     ): Long {
         val audioLang = normalizeLanguageCode(detectedAudioLanguage)
         val audioProfile = LANGUAGE_PROFILES[audioLang] ?: AudioLanguageSyncProfile(audioLang, audioLang.uppercase(Locale.ROOT), 0L, 0L)
-
         val normalizedSubLangs = subtitleLanguages.map { normalizeLanguageCode(it) }.ifEmpty { listOf(audioLang) }
         val allMatchAudioLang = normalizedSubLangs.all { it == audioLang }
-
-        // Frame/sample-rate cadence compensation (e.g., 44.1kHz vs 48kHz container drift)
-        val sampleRateCadenceCompensationMs = when (sampleRateHz) {
-            44100 -> -15L
-            else -> 0L
-        }
-
         val languageAlignmentMs = if (allMatchAudioLang) {
-            // Native same-language caption alignment (tight speech onset lock)
             audioProfile.speechCadenceLeadMs
         } else {
-            // Cross-language translated subtitle alignment (e.g. Japanese audio with English + Spanish multi-subtitles)
             audioProfile.crossLanguageAdaptationMs
         }
-
-        return (languageAlignmentMs + sampleRateCadenceCompensationMs).coerceIn(-2500L, 2500L)
+        return languageAlignmentMs.coerceIn(-2500L, 2500L)
     }
 
     /**

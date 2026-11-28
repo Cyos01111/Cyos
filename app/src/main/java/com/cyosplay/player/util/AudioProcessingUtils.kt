@@ -40,6 +40,12 @@ class Eac3DownmixAudioProcessor : BaseAudioProcessor() {
     @Volatile
     var dialogueEnhancerEnabled: Boolean = true
 
+    fun needsActiveProcessing(channelCount: Int, encoding: Int): Boolean {
+        val isUnityGain = kotlin.math.abs(volumeBoostMultiplier - 1.0f) < 0.005f
+        val isBasicPcm16StereoOrMono = channelCount in 1..2 && encoding == C.ENCODING_PCM_16BIT
+        return !(isBasicPcm16StereoOrMono && isUnityGain && !nightModeCompressionEnabled)
+    }
+
     override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         val encoding = inputAudioFormat.encoding
         val supportedEncoding = encoding == C.ENCODING_PCM_16BIT ||
@@ -50,6 +56,10 @@ class Eac3DownmixAudioProcessor : BaseAudioProcessor() {
             inputAudioFormat.channelCount < 1 ||
             !FfmpegMatroskaCodecRegistry.isSupportedSampleRate(inputAudioFormat.sampleRate)
         ) {
+            return AudioProcessor.AudioFormat.NOT_SET
+        }
+        // Zero-overhead bypass for standard 16-bit mono/stereo PCM at unity gain when Night Audio is OFF
+        if (!needsActiveProcessing(inputAudioFormat.channelCount, encoding)) {
             return AudioProcessor.AudioFormat.NOT_SET
         }
         val outChannels = if (inputAudioFormat.channelCount > 2) 2 else inputAudioFormat.channelCount
@@ -86,6 +96,20 @@ class Eac3DownmixAudioProcessor : BaseAudioProcessor() {
 
         val boost = volumeBoostMultiplier.coerceIn(0.5f, 2.5f)
         val nightMode = nightModeCompressionEnabled
+        if (inChannels in 1..2 &&
+            outChannels == inChannels &&
+            encoding == C.ENCODING_PCM_16BIT &&
+            kotlin.math.abs(boost - 1.0f) < 0.005f &&
+            !nightMode
+        ) {
+            val copyBytes = frameCount * frameSize
+            val originalLimit = inputBuffer.limit()
+            inputBuffer.limit(inputBuffer.position() + copyBytes)
+            outBuffer.put(inputBuffer)
+            inputBuffer.limit(originalLimit)
+            outBuffer.flip()
+            return
+        }
         val centerBoost = if (dialogueEnhancerEnabled) 0.85f else 0.7071f
 
         for (frame in 0 until frameCount) {
@@ -116,15 +140,49 @@ class Eac3DownmixAudioProcessor : BaseAudioProcessor() {
 
                 outBuffer.putShort(finalizeSample(leftMix * 0.58f, boost, nightMode))
                 outBuffer.putShort(finalizeSample(rightMix * 0.58f, boost, nightMode))
+            } else if (inChannels == 5) {
+                // 5.0 surround (FL, FR, FC, BL, BR)
+                val fl = readNormalizedSample(inputBuffer, encoding)
+                val fr = readNormalizedSample(inputBuffer, encoding)
+                val fc = readNormalizedSample(inputBuffer, encoding)
+                val bl = readNormalizedSample(inputBuffer, encoding)
+                val br = readNormalizedSample(inputBuffer, encoding)
+                val leftMix = fl + (fc * centerBoost) + (bl * 0.7071f)
+                val rightMix = fr + (fc * centerBoost) + (br * 0.7071f)
+                outBuffer.putShort(finalizeSample(leftMix * 0.62f, boost, nightMode))
+                outBuffer.putShort(finalizeSample(rightMix * 0.62f, boost, nightMode))
+            } else if (inChannels == 4) {
+                // Quad 4.0 surround (FL, FR, BL, BR)
+                val fl = readNormalizedSample(inputBuffer, encoding)
+                val fr = readNormalizedSample(inputBuffer, encoding)
+                val bl = readNormalizedSample(inputBuffer, encoding)
+                val br = readNormalizedSample(inputBuffer, encoding)
+                val leftMix = fl + (bl * 0.7071f)
+                val rightMix = fr + (br * 0.7071f)
+                outBuffer.putShort(finalizeSample(leftMix * 0.68f, boost, nightMode))
+                outBuffer.putShort(finalizeSample(rightMix * 0.68f, boost, nightMode))
+            } else if (inChannels == 3) {
+                // 3.0 LCR (FL, FR, FC)
+                val fl = readNormalizedSample(inputBuffer, encoding)
+                val fr = readNormalizedSample(inputBuffer, encoding)
+                val fc = readNormalizedSample(inputBuffer, encoding)
+                val leftMix = fl + (fc * centerBoost)
+                val rightMix = fr + (fc * centerBoost)
+                outBuffer.putShort(finalizeSample(leftMix * 0.72f, boost, nightMode))
+                outBuffer.putShort(finalizeSample(rightMix * 0.72f, boost, nightMode))
             } else if (inChannels == 2) {
                 val left = readNormalizedSample(inputBuffer, encoding)
                 val right = readNormalizedSample(inputBuffer, encoding)
                 outBuffer.putShort(finalizeSample(left, boost, nightMode))
                 outBuffer.putShort(finalizeSample(right, boost, nightMode))
             } else {
+                // Mono (1ch) or fallback: consume every input channel to keep PCM framing aligned
+                val primary = readNormalizedSample(inputBuffer, encoding)
+                for (extra in 1 until inChannels) {
+                    readNormalizedSample(inputBuffer, encoding)
+                }
                 for (ch in 0 until outChannels) {
-                    val sample = readNormalizedSample(inputBuffer, encoding)
-                    outBuffer.putShort(finalizeSample(sample, boost, nightMode))
+                    outBuffer.putShort(finalizeSample(primary, boost, nightMode))
                 }
             }
         }
@@ -271,9 +329,9 @@ object AudioBadgeFormatter {
             raw.contains("vorbis") -> "VORBIS"
             raw.contains("mp4a.40.5") || raw.contains("mp4a.40.29") || raw.contains("he-aac") || raw.contains("heaac") ||
                 labelLower.contains("he-aac") || labelLower.contains("heaac") || labelLower.contains("aac+") ->
-                "HE-AAC / AAC-LC (HE-AAC • mp4a.40.5 / mp4a.40.29 • AAC LC (44.1 kHz, Stereo) • 44100 HZ)"
-            raw.contains("mp4a") || raw.contains("aac") || raw.contains("lc") || labelLower.contains("aac") || labelLower.contains("lc") || labelLower.contains("44100") || labelLower.contains("44.1") ->
-                "AAC-LC / HE-AAC (mp4a.40.2 • AAC LC (44.1 kHz, Stereo) • 44100 HZ)"
+                "HE-AAC"
+            raw.contains("mp4a") || raw.contains("aac") || labelLower.contains("aac") ->
+                "AAC-LC"
             raw.contains("raw") || raw.contains("pcm") -> "PCM"
             raw.contains("mpeg") || raw.contains("mp3") -> "MP3"
             labelLower.contains("truehd") && labelLower.contains("atmos") -> "TRUEHD ATMOS"
@@ -289,10 +347,10 @@ object AudioBadgeFormatter {
         }
         val baseBadge = if (channelLabel.isNotEmpty()) "$codecName $channelLabel" else codecName
         return when {
-            sampleRateHz == 44100 && !baseBadge.contains("44100 HZ") ->
-                "$baseBadge • 44,100 Hz (44100 HZ)"
-            sampleRateHz in FfmpegMatroskaCodecRegistry.SUPPORTED_SAMPLE_RATES_HZ && sampleRateHz != 44100 ->
-                "$baseBadge • ${FfmpegMatroskaCodecRegistry.formatSampleRateHz(sampleRateHz)} (${sampleRateHz} HZ)"
+            sampleRateHz > 0 && sampleRateHz in FfmpegMatroskaCodecRegistry.SUPPORTED_SAMPLE_RATES_HZ ->
+                "$baseBadge • ${FfmpegMatroskaCodecRegistry.formatSampleRateHz(sampleRateHz)}"
+            sampleRateHz > 0 ->
+                "$baseBadge • ${sampleRateHz / 1000.0} kHz"
             else -> baseBadge
         }
     }
@@ -324,9 +382,7 @@ object AudioBadgeFormatter {
                 titleLower.contains("mpeg-4 part 2") || titleLower.contains("asp") || titleLower.contains("lc") ||
                 titleLower.contains("xvid") || titleLower.contains("divx") ->
                 "Video Codec MPEG-4 part 2 / ASP / LC • MPEG-4 Part 2 (XVID) (Advanced Simple Profile with packed B-frames)"
-            raw.contains("avc1") || titleLower.contains("avc1") || titleLower.contains("4d401e") || titleLower.contains("64001e") ->
-                "H.264 / AVC (avc1 • libx264, yuv420p, -movflags +faststart)"
-            raw.contains("avc") || raw.contains("264") || raw.contains("matroska") -> "H.264 / AVC"
+            raw.contains("avc1") || raw.contains("avc") || raw.contains("264") || raw.contains("matroska") -> "H.264 / AVC"
             else -> "H.264 / AVC"
         }
         val res = when {
@@ -477,22 +533,24 @@ object AudioBadgeFormatter {
     }
 
     /**
-     * Compact MediaInfo / FFprobe summary line for the in-player technical HUD.
+     * Compact Media3 / MediaCodec technical summary line for the in-player HUD.
      */
     fun formatMediaInfoFfprobeHudSummary(
         width: Int,
         height: Int,
         mimeType: String,
         forceHwAccel: Boolean,
-        preferSwDecoder: Boolean
+        preferSwDecoder: Boolean,
+        activeDecoderName: String? = null
     ): String {
         val safeW = if (width > 0) width else 1920
         val safeH = if (height > 0) height else 1080
         val decoderPipeline = when {
-            preferSwDecoder -> "SW/SW+ (FFmpeg/Lavf Multi-Core Software Decoder)"
-            forceHwAccel -> "HW/HW+ Forced (MediaCodec HW + SW Auto-Fallback)"
-            else -> "HW/HW+ Auto (MediaCodec Hardware + SW Fallback)"
+            preferSwDecoder -> "SW (Android MediaCodec Software Decoder)"
+            forceHwAccel -> "HW Forced (Android MediaCodec Hardware + SW Fallback)"
+            else -> "HW+ Auto (Android MediaCodec Hardware + SW Fallback)"
         }
-        return "MediaInfo/FFprobe: ${safeW}×${safeH} • Matroska (.mkv) (matroska,webm ,mkvmerge v56.1.0) • Lavf62.3.100 • H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (libx264, yuv420p, -movflags +faststart) / MPEG-4 Part 2 (XVID) (Advanced Simple Profile with packed B-frames) • HE-AAC & AAC LC (44.1 kHz, Stereo) • FFmpeg extension • Dec: $decoderPipeline ($mimeType)"
+        val activeLabel = activeDecoderName?.takeIf { it.isNotBlank() }?.let { " • Active: $it" }.orEmpty()
+        return "Media3 Track: ${safeW}×${safeH} • Stream: $mimeType • Engine: $decoderPipeline$activeLabel"
     }
 }

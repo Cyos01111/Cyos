@@ -2,7 +2,6 @@ package com.cyosplay.player.util
 
 import android.app.ActivityManager
 import android.content.Context
-import coil.Coil
 
 enum class RamPerformanceTier(
     val displayName: String,
@@ -100,7 +99,7 @@ object MemoryManager {
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = 6_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = true,
+                prioritizeTimeOverSizeThresholds = false,
                 thumbnailMaxDimensionPx = 180,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = true,
@@ -120,7 +119,7 @@ object MemoryManager {
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = 8_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = true,
+                prioritizeTimeOverSizeThresholds = false,
                 thumbnailMaxDimensionPx = 220,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -140,7 +139,7 @@ object MemoryManager {
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = if (batterySaverEnabled) 6_000 else 10_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = true,
+                prioritizeTimeOverSizeThresholds = false,
                 thumbnailMaxDimensionPx = if (batterySaverEnabled) 240 else 300,
                 useRgb565Thumbnails = true,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -160,7 +159,7 @@ object MemoryManager {
                 chunkSizeBytes = MemoryBudgetConfig.DEFAULT_MEDIA3_CHUNK_BYTES,
                 backBufferDurationMs = if (batterySaverEnabled) 6_000 else 15_000,
                 retainBackBufferFromKeyframe = true,
-                prioritizeTimeOverSizeThresholds = true,
+                prioritizeTimeOverSizeThresholds = false,
                 thumbnailMaxDimensionPx = if (batterySaverEnabled) 260 else 360,
                 useRgb565Thumbnails = batterySaverEnabled,
                 disableHeavyVisualEffects = batterySaverEnabled,
@@ -179,11 +178,6 @@ object MemoryManager {
         try {
             com.cyosplay.player.ui.components.VideoFrameThumbnailCache.clear()
         } catch (_: Throwable) {
-        }
-        try {
-            Coil.imageLoader(context.applicationContext).memoryCache?.clear()
-        } catch (_: Throwable) {
-            // Ignore in headless test environments
         }
     }
 }

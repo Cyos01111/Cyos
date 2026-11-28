@@ -5,6 +5,10 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.jar.JarFile
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.SecretKeyFactory
@@ -15,7 +19,7 @@ import org.gradle.api.GradleException
 
 val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignatureAndEncryption") {
     group = "verification"
-    description = "Verifies release APK JAR/APK signatures, optionally seals AES-256-GCM integrity metadata when Secrets are configured, and exports CyosPlay-1.08rv6-release.apk to export/."
+    description = "Verifies release APK JAR/APK signatures, optionally seals AES-256-GCM integrity metadata when Secrets are configured, and exports CyosPlay-1.08rv9-release.apk to export/."
 
     doLast {
         fun resolveSecret(name: String): String? {
@@ -43,8 +47,16 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             return null
         }
 
-        val releaseVersionName = "1.08rv6"
-        val releaseVersionCode = 48
+        val androidExt = project.extensions.findByName("android")
+        val defaultConfigObj = androidExt?.let { ext ->
+            runCatching { ext.javaClass.getMethod("getDefaultConfig").invoke(ext) }.getOrNull()
+        }
+        val releaseVersionName = defaultConfigObj?.let { cfg ->
+            runCatching { cfg.javaClass.getMethod("getVersionName").invoke(cfg) as? String }.getOrNull()
+        }?.takeIf { it.isNotBlank() } ?: "1.08rv9"
+        val releaseVersionCode = defaultConfigObj?.let { cfg ->
+            runCatching { (cfg.javaClass.getMethod("getVersionCode").invoke(cfg) as? Number)?.toInt() }.getOrNull()
+        } ?: 51
         val releaseKeystorePath = resolveSecret("CYOSPLAY_RELEASE_KEYSTORE_PATH") ?: "cyosplay-release.keystore"
         val releaseKeyAlias = resolveSecret("CYOSPLAY_RELEASE_KEY_ALIAS") ?: "cyosplay_release"
         val releaseKeystorePassword = resolveSecret("CYOSPLAY_RELEASE_STORE_PASSWORD")
@@ -59,6 +71,7 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
         val exportDir = rootProject.file("export")
         val exportedApk = File(exportDir, "CyosPlay-$releaseVersionName-release.apk")
         val exportedSha256File = File(exportDir, "CyosPlay-$releaseVersionName-release.apk.sha256")
+        val exportedZip = File(exportDir, "CyosPlay-$releaseVersionName-release-apk.zip")
         val releaseKeystoreFile = rootProject.file(releaseKeystorePath)
 
         val useCustomReleaseKeystore = releaseKeystoreFile.isFile &&
@@ -67,7 +80,7 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             !releaseKeyPassword.isNullOrBlank()
 
         fun purgeUnverifiedArtifacts() {
-            listOf(exportedApk, exportedSha256File, integrityEnvelopeFile).forEach { file ->
+            listOf(exportedApk, exportedSha256File, exportedZip, integrityEnvelopeFile).forEach { file ->
                 if (file.exists()) {
                     file.delete()
                 }
@@ -135,29 +148,53 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
                 throw GradleException("Release APK missing at ${builtApk.absolutePath}.")
             }
 
-            // 1. Optional custom release keystore validation & certificate pinning
-            var expectedCertSha256: String? = null
+            // 1. Strict release keystore guardrail: by default NEVER allow a debug-signed APK to pass release verification.
+            //    An explicit -PallowDebugSignedReleaseExport=true opt-in allows verified debug-signed local testing exports.
+            val allowDebugSignedTestingExport =
+                (project.findProperty("allowDebugSignedReleaseExport") as? String)?.equals("true", ignoreCase = true) == true
+            if (!useCustomReleaseKeystore && !allowDebugSignedTestingExport) {
+                throw GradleException(
+                    "Release verification blocked: custom release keystore '${releaseKeystoreFile.name}' and " +
+                        "CYOSPLAY_RELEASE_STORE_PASSWORD Secret must be configured before exporting a release APK. " +
+                        "(For local testing exports only, pass -PallowDebugSignedReleaseExport=true.)"
+                )
+            }
+            val activeKeystoreFile: File
+            val activeKeyAlias: String
+            val ksPassChars: CharArray
+            val keyPassChars: CharArray
             if (useCustomReleaseKeystore) {
-                val ksPassChars = releaseKeystorePassword!!.toCharArray()
-                val keyPassChars = releaseKeyPassword!!.toCharArray()
-                try {
-                    val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
-                    releaseKeystoreFile.inputStream().use { keyStore.load(it, ksPassChars) }
-                    if (!keyStore.containsAlias(releaseKeyAlias)) {
-                        throw GradleException("Expected release key alias '$releaseKeyAlias' not found in keystore.")
-                    }
-                    val privateKey = keyStore.getKey(releaseKeyAlias, keyPassChars)
-                        ?: throw GradleException("Release private key '$releaseKeyAlias' could not be unlocked with configured password.")
-                    if (privateKey.encoded == null && privateKey.algorithm.isNullOrBlank()) {
-                        throw GradleException("Release private key '$releaseKeyAlias' is invalid.")
-                    }
-                    val releaseCert = keyStore.getCertificate(releaseKeyAlias)
-                        ?: throw GradleException("Release X.509 certificate missing for alias '$releaseKeyAlias'.")
-                    expectedCertSha256 = sha256Hex(releaseCert.encoded)
-                } finally {
-                    ksPassChars.fill('\u0000')
-                    keyPassChars.fill('\u0000')
+                activeKeystoreFile = releaseKeystoreFile
+                activeKeyAlias = releaseKeyAlias
+                ksPassChars = releaseKeystorePassword!!.toCharArray()
+                keyPassChars = releaseKeyPassword!!.toCharArray()
+            } else {
+                activeKeystoreFile = rootProject.file("debug.keystore")
+                activeKeyAlias = "androiddebugkey"
+                ksPassChars = "android".toCharArray()
+                keyPassChars = "android".toCharArray()
+                if (!activeKeystoreFile.isFile) {
+                    throw GradleException("Debug-signed testing export requires workspace debug.keystore at ${activeKeystoreFile.absolutePath}.")
                 }
+            }
+            val expectedCertSha256: String
+            try {
+                val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
+                activeKeystoreFile.inputStream().use { keyStore.load(it, ksPassChars) }
+                if (!keyStore.containsAlias(activeKeyAlias)) {
+                    throw GradleException("Expected signing key alias '$activeKeyAlias' not found in keystore.")
+                }
+                val privateKey = keyStore.getKey(activeKeyAlias, keyPassChars)
+                    ?: throw GradleException("Signing private key '$activeKeyAlias' could not be unlocked.")
+                if (privateKey.encoded == null && privateKey.algorithm.isNullOrBlank()) {
+                    throw GradleException("Signing private key '$activeKeyAlias' is invalid.")
+                }
+                val signingCert = keyStore.getCertificate(activeKeyAlias)
+                    ?: throw GradleException("Signing X.509 certificate missing for alias '$activeKeyAlias'.")
+                expectedCertSha256 = sha256Hex(signingCert.encoded)
+            } finally {
+                ksPassChars.fill('\u0000')
+                keyPassChars.fill('\u0000')
             }
 
             // 2a. Validate JAR signature via jarsigner -verify
@@ -211,19 +248,10 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
                             throw GradleException("APK entry '$name' has no verified JAR signature certificates.")
                         }
                         val entryFingerprints = certs.map { sha256Hex(it.encoded) }
-                        if (expectedCertSha256 != null) {
-                            if (expectedCertSha256 !in entryFingerprints) {
-                                throw GradleException("APK entry '$name' certificate fingerprint does not match '$releaseKeyAlias' release keystore.")
-                            }
-                            observedCertSha256 = expectedCertSha256
-                        } else {
-                            val primaryFp = entryFingerprints.first()
-                            if (observedCertSha256 == null) {
-                                observedCertSha256 = primaryFp
-                            } else if (observedCertSha256 !in entryFingerprints) {
-                                throw GradleException("APK entry '$name' certificate fingerprint mismatch across signed entries.")
-                            }
+                        if (expectedCertSha256 !in entryFingerprints) {
+                            throw GradleException("APK entry '$name' certificate fingerprint does not match '$releaseKeyAlias' release keystore.")
                         }
+                        observedCertSha256 = expectedCertSha256
                         verifiedRequiredEntries += name
                     }
                 }
@@ -241,26 +269,34 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             val verifiedCertSha256 = observedCertSha256
                 ?: throw GradleException("Unable to determine verified APK signing certificate fingerprint.")
 
-            // 2c. Android SDK apksigner verification (v1 + v2 APK Signature Schemes)
-            val sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: "/opt/android/sdk"
+            // 2c. Cross-platform Android SDK apksigner verification (v1 + v2 APK Signature Schemes)
+            val sdkRoot = System.getenv("ANDROID_SDK_ROOT")
+                ?: System.getenv("ANDROID_HOME")
+                ?: "/opt/android/sdk"
             val buildToolsDir = File(sdkRoot, "build-tools")
+            val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
+            val apkSignerName = if (isWindows) "apksigner.bat" else "apksigner"
             val apkSignerBin = if (buildToolsDir.isDirectory) {
                 buildToolsDir.listFiles()
                     ?.sortedBy { it.name }
-                    ?.map { File(it, "apksigner") }
-                    ?.lastOrNull { it.isFile && it.canExecute() }
+                    ?.map { File(it, apkSignerName) }
+                    ?.lastOrNull { it.isFile && (isWindows || it.canExecute()) }
             } else {
                 null
             }
-            if (apkSignerBin != null) {
-                val apkSignerProc = ProcessBuilder(apkSignerBin.absolutePath, "verify", builtApk.absolutePath)
-                    .redirectErrorStream(true)
-                    .start()
-                val apkSignerOut = apkSignerProc.inputStream.bufferedReader().readText()
-                val apkSignerExit = apkSignerProc.waitFor()
-                if (apkSignerExit != 0) {
-                    throw GradleException("apksigner verification failed (exit=$apkSignerExit): ${apkSignerOut.trim()}")
-                }
+            if (apkSignerBin == null) {
+                throw GradleException(
+                    "apksigner binary not found under '$buildToolsDir' (ANDROID_SDK_ROOT='$sdkRoot'); " +
+                        "refusing to skip APK v2/v3 signature verification."
+                )
+            }
+            val apkSignerProc = ProcessBuilder(apkSignerBin.absolutePath, "verify", builtApk.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+            val apkSignerOut = apkSignerProc.inputStream.bufferedReader().readText()
+            val apkSignerExit = apkSignerProc.waitFor()
+            if (apkSignerExit != 0) {
+                throw GradleException("apksigner verification failed (exit=$apkSignerExit): ${apkSignerOut.trim()}")
             }
 
             val apkSha256 = sha256HexFile(builtApk)
@@ -326,7 +362,7 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
                 }
             }
 
-            // 4. Export verified release APK + SHA-256 digest into export/ while preserving standard Gradle output
+            // 4. Export verified release APK, SHA-256 digest, and explorer-visible ZIP archive into export/
             exportDir.mkdirs()
             builtApk.copyTo(exportedApk, overwrite = true)
             if (sha256HexFile(exportedApk) != apkSha256) {
@@ -334,10 +370,61 @@ val verifyReleaseSignatureAndEncryption = tasks.register("verifyReleaseSignature
             }
             exportedSha256File.writeText("$apkSha256  ${exportedApk.name}\n", StandardCharsets.UTF_8)
 
+            // Package verified Release APK (STORED for zero double-compression) + SHA-256 digest into ZIP
+            fun computeCrc32(file: File): Long {
+                val crc = CRC32()
+                file.inputStream().buffered().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read <= 0) break
+                        crc.update(buf, 0, read)
+                    }
+                }
+                return crc.value
+            }
+
+            ZipOutputStream(exportedZip.outputStream().buffered()).use { zos ->
+                val apkEntry = ZipEntry(exportedApk.name).apply {
+                    method = ZipEntry.STORED
+                    size = exportedApk.length()
+                    compressedSize = exportedApk.length()
+                    crc = computeCrc32(exportedApk)
+                }
+                zos.putNextEntry(apkEntry)
+                exportedApk.inputStream().buffered().use { it.copyTo(zos) }
+                zos.closeEntry()
+
+                val shaEntry = ZipEntry(exportedSha256File.name)
+                zos.putNextEntry(shaEntry)
+                exportedSha256File.inputStream().buffered().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+
+            // Round-trip verify archived APK bytes inside exportedZip match apkSha256
+            val zippedApkSha256 = ZipFile(exportedZip).use { zf ->
+                val entry = zf.getEntry(exportedApk.name)
+                    ?: throw GradleException("Exported ZIP missing expected entry '${exportedApk.name}'.")
+                val md = MessageDigest.getInstance("SHA-256")
+                zf.getInputStream(entry).buffered().use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buf)
+                        if (read <= 0) break
+                        md.update(buf, 0, read)
+                    }
+                }
+                md.digest().joinToString("") { "%02x".format(it) }
+            }
+            if (zippedApkSha256 != apkSha256) {
+                throw GradleException("Exported ZIP entry '${exportedApk.name}' failed SHA-256 integrity verification.")
+            }
+
             logger.lifecycle(
                 "CyosPlay $releaseVersionName release export verification PASSED [$signingMode]: " +
                     "JAR & APK signatures verified (cert ${verifiedCertSha256.take(16)}...), " +
-                    "exported to ${exportedApk.relativeTo(rootProject.projectDir).path} (${exportedApk.length()} bytes)."
+                    "exported to ${exportedApk.relativeTo(rootProject.projectDir).path} (${exportedApk.length()} bytes) " +
+                    "and ${exportedZip.relativeTo(rootProject.projectDir).path} (${exportedZip.length()} bytes)."
             )
         } catch (failure: Throwable) {
             purgeUnverifiedArtifacts()

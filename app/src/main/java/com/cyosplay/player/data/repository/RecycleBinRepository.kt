@@ -25,8 +25,22 @@ class RecycleBinRepository(private val context: Context) {
     private val prefs = appContext.getSharedPreferences("cyosplay_recycle_bin_v2", Context.MODE_PRIVATE)
     private val trashDir = File(appContext.filesDir, "encrypted_recycle_bin").apply { mkdirs() }
 
-    private val rotationListener = CryptoSecurityManager.KeyRotationListener { oldKey, newKey ->
-        reEncryptRecycleBin(oldKey, newKey)
+    private var stagedRotationPairs: List<Pair<File, File>> = emptyList()
+    private var stagedHeaderRewraps: List<Pair<File, ByteArray>> = emptyList()
+    private var stagedCatalogJson: String? = null
+
+    private val rotationListener = object : CryptoSecurityManager.TwoPhaseKeyRotationListener {
+        override fun prepareMasterKeyRotation(oldKey: SecretKey, newKey: SecretKey): Boolean {
+            return prepareReEncryptRecycleBin(oldKey, newKey)
+        }
+
+        override fun commitMasterKeyRotation(newKey: SecretKey) {
+            commitReEncryptRecycleBin(newKey)
+        }
+
+        override fun rollbackMasterKeyRotation(oldKey: SecretKey) {
+            rollbackReEncryptRecycleBin()
+        }
     }
 
     init {
@@ -34,32 +48,127 @@ class RecycleBinRepository(private val context: Context) {
         CryptoSecurityManager.registerRotationListener(rotationListener)
     }
 
+    fun release() {
+        CryptoSecurityManager.unregisterRotationListener(rotationListener)
+    }
+
     @Synchronized
     private fun cleanupInterruptedStagingFiles() {
         trashDir.listFiles()?.forEach { file ->
-            if (file.name.endsWith(".tmp")) {
+            val name = file.name
+            if (name.endsWith(ROTATION_STAGE_SUFFIX)) {
+                val targetName = name.removeSuffix(ROTATION_STAGE_SUFFIX)
+                val targetFile = File(trashDir, targetName)
+                val stageValidUnderCurrentKey = runCatching {
+                    CryptoSecurityManager.verifyEncryptedFileIntegrity(appContext, file)
+                }.getOrDefault(false)
+                if (stageValidUnderCurrentKey) {
+                    if (targetFile.exists()) targetFile.delete()
+                    if (!file.renameTo(targetFile)) {
+                        runCatching {
+                            file.copyTo(targetFile, overwrite = true)
+                            CryptoSecurityManager.shredFileZeroTrace(file)
+                        }
+                    }
+                } else {
+                    CryptoSecurityManager.shredFileZeroTrace(file)
+                }
+            } else if (
+                name.endsWith(".tmp") ||
+                name.contains(".tmp_") ||
+                name.contains(".dec_tmp_") ||
+                name.contains(".rot_plain_") ||
+                name.contains(".rot_enc_")
+            ) {
                 CryptoSecurityManager.shredFileZeroTrace(file)
             }
         }
     }
 
     @Synchronized
-    private fun reEncryptRecycleBin(oldKey: SecretKey, newKey: SecretKey) {
-        val raw = prefs.getString(KEY_RECYCLE_ITEMS_ENC, null) ?: return
-        val plain = CryptoSecurityManager.decryptStringWithKey(raw, oldKey) ?: return
+    private fun prepareReEncryptRecycleBin(oldKey: SecretKey, newKey: SecretKey): Boolean {
+        val raw = prefs.getString(KEY_RECYCLE_ITEMS_ENC, null) ?: return true
+        val plain = CryptoSecurityManager.decryptStringWithKey(raw, oldKey) ?: return false
         val items = parseRecycleBinJson(plain)
+        val stagedPairs = mutableListOf<Pair<File, File>>()
+        val stagedRewraps = mutableListOf<Pair<File, ByteArray>>()
+
         for (item in items) {
             val trashFile = File(item.trashFilePath)
             if (trashFile.exists() && trashFile.isFile) {
-                try {
-                    CryptoSecurityManager.reEncryptFileOnDisk(trashFile, oldKey, newKey)
-                } catch (_: Exception) {
-                    // Keep existing file intact if interrupted
+                if (CryptoSecurityManager.isStreamV4File(trashFile)) {
+                    val preparedHeader = CryptoSecurityManager.prepareStreamV4HeaderRewrap(trashFile, oldKey, newKey)
+                    if (preparedHeader == null) {
+                        stagedRewraps.forEach { (_, buf) -> buf.fill(0) }
+                        stagedPairs.forEach { (_, s) -> CryptoSecurityManager.shredFileZeroTrace(s) }
+                        return false
+                    }
+                    stagedRewraps.add(trashFile to preparedHeader)
+                } else {
+                    val stageFile = File(trashFile.parentFile ?: trashDir, "${trashFile.name}$ROTATION_STAGE_SUFFIX")
+                    val tempPlain = File(trashFile.parentFile ?: trashDir, "${trashFile.name}.rot_plain_${System.nanoTime()}")
+                    val ok = try {
+                        val decOk = CryptoSecurityManager.decryptFileFromDiskWithKey(trashFile, tempPlain, oldKey)
+                        val encOk = decOk && CryptoSecurityManager.encryptFileToStreamV4WithKek(tempPlain, stageFile, newKey)
+                        CryptoSecurityManager.shredFileZeroTrace(tempPlain)
+                        encOk
+                    } catch (_: Exception) {
+                        CryptoSecurityManager.shredFileZeroTrace(tempPlain)
+                        false
+                    }
+                    if (!ok) {
+                        CryptoSecurityManager.shredFileZeroTrace(stageFile)
+                        stagedRewraps.forEach { (_, buf) -> buf.fill(0) }
+                        stagedPairs.forEach { (_, s) -> CryptoSecurityManager.shredFileZeroTrace(s) }
+                        return false
+                    }
+                    stagedPairs.add(trashFile to stageFile)
                 }
             }
         }
-        val cipher = CryptoSecurityManager.encryptStringWithKey(plain, newKey)
-        prefs.edit().putString(KEY_RECYCLE_ITEMS_ENC, cipher).commit()
+        stagedRotationPairs = stagedPairs
+        stagedHeaderRewraps = stagedRewraps
+        stagedCatalogJson = plain
+        return true
+    }
+
+    @Synchronized
+    private fun commitReEncryptRecycleBin(newKey: SecretKey) {
+        for ((targetFile, headerPayload) in stagedHeaderRewraps) {
+            runCatching {
+                CryptoSecurityManager.commitStreamV4HeaderRewrap(targetFile, headerPayload)
+            }
+            headerPayload.fill(0)
+        }
+        for ((targetFile, stageFile) in stagedRotationPairs) {
+            if (stageFile.exists()) {
+                if (targetFile.exists()) targetFile.delete()
+                if (!stageFile.renameTo(targetFile)) {
+                    runCatching {
+                        stageFile.copyTo(targetFile, overwrite = true)
+                        CryptoSecurityManager.shredFileZeroTrace(stageFile)
+                    }
+                }
+            }
+        }
+        stagedCatalogJson?.let { json ->
+            val cipher = CryptoSecurityManager.encryptStringWithKey(json, newKey)
+            prefs.edit().putString(KEY_RECYCLE_ITEMS_ENC, cipher).commit()
+        }
+        stagedHeaderRewraps = emptyList()
+        stagedRotationPairs = emptyList()
+        stagedCatalogJson = null
+    }
+
+    @Synchronized
+    private fun rollbackReEncryptRecycleBin() {
+        stagedHeaderRewraps.forEach { (_, buf) -> buf.fill(0) }
+        stagedRotationPairs.forEach { (_, stageFile) ->
+            if (stageFile.exists()) CryptoSecurityManager.shredFileZeroTrace(stageFile)
+        }
+        stagedHeaderRewraps = emptyList()
+        stagedRotationPairs = emptyList()
+        stagedCatalogJson = null
     }
 
     fun getRecycleBinItems(): List<RecycleBinItem> {
@@ -379,10 +488,11 @@ class RecycleBinRepository(private val context: Context) {
             )
         }
         val cipher = CryptoSecurityManager.encryptString(appContext, arr.toString())
-        prefs.edit().putString(KEY_RECYCLE_ITEMS_ENC, cipher).commit()
+        prefs.edit().putString(KEY_RECYCLE_ITEMS_ENC, cipher).apply()
     }
 
     companion object {
         private const val KEY_RECYCLE_ITEMS_ENC = "recycle_items_aes_gcm"
+        private const val ROTATION_STAGE_SUFFIX = ".rot_stage"
     }
 }

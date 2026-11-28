@@ -92,8 +92,8 @@ enum class MiniPlayerSizeMode {
 }
 
 data class VideoPlayerUiState(
-    val appVersionName: String = "1.08rv6",
-    val appDescription: String = "CyosPlay 1.08rv6",
+    val appVersionName: String = "1.08rv9",
+    val appDescription: String = "CyosPlay 1.08rv9",
     val aboutUsCreator: String = "Created by Tkm",
     val aboutUsCopyright: String = "© 2026 TKm. All rights reserved.",
     val currentNavTab: NavDestination = NavDestination.FOLDERS,
@@ -289,7 +289,11 @@ data class VideoPlayerUiState(
     val pendingBatchMoveDestination: MoveDestinationOption? = null,
     val pendingBatchMoveCustomSubfolder: String = "",
     val pendingDeleteIntentSender: android.content.IntentSender? = null,
-    val pendingRecycleBinDeleteIds: Set<String> = emptySet()
+    val pendingRecycleBinDeleteIds: Set<String> = emptySet(),
+    val subtitleEncodingOverride: String = "AUTO",
+    val activeVideoChapters: List<com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment> = emptyList(),
+    val isFileOperationBusy: Boolean = false,
+    val fileOperationStatusText: String? = null
 ) {
     val inspectedVideoProperties: VideoProperties?
         get() = inspectedVideoDetails
@@ -343,6 +347,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     private val navigationBackStack = ArrayDeque<Screen>()
     private var vaultAutoLockJob: kotlinx.coroutines.Job? = null
+    private var sleepTimerJob: kotlinx.coroutines.Job? = null
     private var mediaStoreVideoObserver: android.database.ContentObserver? = null
     private var deferredPostFrameJob: kotlinx.coroutines.Job? = null
     private var activeExoPlayerRef: java.lang.ref.WeakReference<androidx.media3.exoplayer.ExoPlayer>? = null
@@ -379,13 +384,47 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         const val VAULT_AUTO_LOCK_SECONDS = 10
         const val VAULT_AUTO_LOCK_TIMEOUT_MS = 10_000L
 
+        fun lookupFloatSettingCaseInsensitive(map: Map<String, Float>, key: String): Float? {
+            val trimmed = key.trim().trimEnd('/')
+            if (trimmed.isEmpty()) return null
+            map[trimmed]?.let { return it }
+            return map.entries.firstOrNull {
+                it.key.trim().trimEnd('/').equals(trimmed, ignoreCase = true)
+            }?.value
+        }
+
+        fun isVaultVideoItem(video: VideoItem?): Boolean {
+            if (video == null) return false
+            if (video.folderId.equals("private_vault", ignoreCase = true)) return true
+            if (video.uri.scheme.equals(com.cyos.player.VaultChunkedAesGcmDataSource.SCHEME, ignoreCase = true)) {
+                return true
+            }
+            val p = video.path.lowercase()
+            val fp = video.folderPath.lowercase()
+            val u = video.uri.toString().lowercase()
+            return p.contains("vault_ephemeral_play") ||
+                p.contains("private_encrypted_vault") ||
+                p.contains("cyos_vault") ||
+                p.endsWith(".cyosvault") ||
+                fp.contains("private_encrypted_vault") ||
+                fp.contains("vault_ephemeral_play") ||
+                u.contains("vault_ephemeral_play") ||
+                u.contains("private_encrypted_vault") ||
+                u.contains(".cyosvault")
+        }
+
         fun buildCodecProfileKey(
             decoderEngineMode: DecoderEngineMode,
             forceHardwareAccelerationHighBitrate: Boolean,
             lowRamShieldEnabled: Boolean,
             batterySaverModeEnabled: Boolean
         ): String {
-            return "${decoderEngineMode.name}:$forceHardwareAccelerationHighBitrate:$lowRamShieldEnabled:$batterySaverModeEnabled"
+            return com.cyos.player.CyosPlayerHolder.buildCodecProfileKey(
+                decoderModeName = decoderEngineMode.name,
+                preferSoftwareDecoder = forceHardwareAccelerationHighBitrate,
+                forceLowRamMode = lowRamShieldEnabled,
+                batterySaverEnabled = batterySaverModeEnabled
+            )
         }
 
         @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -491,8 +530,25 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
 
     init {
         CryptoSecurityManager.enforcePermanentNonDebugMode(appContext)
-        CryptoSecurityManager.getOrCreateDataEncryptionKey(appContext)
         loadInitialState()
+        // Move Keystore unwrap & integrity round-trip off the main thread so cold startup stays jank-free
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                CryptoSecurityManager.getOrCreateDataEncryptionKey(appContext)
+                val verified = CryptoSecurityManager.verifyDeviceKeystoreIntegrity(appContext)
+                val rotations = CryptoSecurityManager.getAutoRotationCount(appContext)
+                val cracks = CryptoSecurityManager.getFailedCrackAttempts(appContext)
+                val locked = CryptoSecurityManager.isDataCodesLocked(appContext)
+                _uiState.update { state ->
+                    state.copy(
+                        invisibleSeedVerified = verified,
+                        autoKeyRotationCount = rotations,
+                        failedCrackAttempts = cracks,
+                        isDataCodesLocked = locked
+                    )
+                }
+            }
+        }
     }
 
     fun loadInitialState() {
@@ -563,7 +619,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 hasDecoyPin = settingsRepository.hasDecoyVaultPin(),
                 autoKeyRotationCount = CryptoSecurityManager.getAutoRotationCount(appContext),
                 failedCrackAttempts = CryptoSecurityManager.getFailedCrackAttempts(appContext),
-                invisibleSeedVerified = CryptoSecurityManager.verifyDeviceKeystoreIntegrity(appContext),
+                invisibleSeedVerified = true,
                 debugModePermanentlyDisabled = CryptoSecurityManager.isDebugModePermanentlyDisabled(),
                 subtitleFontSize = settingsRepository.getSubtitleFontSize(),
                 subtitleCustomSp = settingsRepository.getSubtitleCustomSp(),
@@ -1017,18 +1073,34 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             return true
         }
         val current = _uiState.value.currentScreen
-        if (current is Screen.Player) {
-            vaultManager.wipeEphemeralPlaybackCache()
+        if (current is Screen.Player && isVaultVideoItem(current.video)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                vaultManager.wipeEphemeralPlaybackCache()
+            }
+            notifyVaultUserInteraction()
+        } else if (current is Screen.Player) {
+            viewModelScope.launch(Dispatchers.IO) {
+                vaultManager.wipeEphemeralPlaybackCache()
+            }
         }
-        val updatedProgress = settingsRepository.getAllPlaybackProgress()
-        val updatedLastPath = settingsRepository.getLastPlayedVideoPath()
-            ?: _uiState.value.lastPlayedVideoPath
+        val repoProgress = settingsRepository.getAllPlaybackProgress()
+        val mergedProgress = buildMap {
+            putAll(repoProgress)
+            _uiState.value.playbackProgressMap.forEach { (path, inMemEntry) ->
+                val existing = this[path]
+                if (existing == null || inMemEntry.updatedAtMs >= existing.updatedAtMs) {
+                    put(path, inMemEntry)
+                }
+            }
+        }
+        val updatedLastPath = _uiState.value.lastPlayedVideoPath
+            ?: settingsRepository.getLastPlayedVideoPath()
         return if (navigationBackStack.isNotEmpty()) {
             val prev = navigationBackStack.removeLast()
             _uiState.update {
                 it.copy(
                     currentScreen = prev,
-                    playbackProgressMap = updatedProgress,
+                    playbackProgressMap = mergedProgress,
                     lastPlayedVideoPath = updatedLastPath
                 )
             }
@@ -1037,7 +1109,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             _uiState.update {
                 it.copy(
                     currentScreen = Screen.Home,
-                    playbackProgressMap = updatedProgress,
+                    playbackProgressMap = mergedProgress,
                     lastPlayedVideoPath = updatedLastPath
                 )
             }
@@ -1056,7 +1128,11 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
      *    are deferred off the main thread onto Dispatchers.IO.
      */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    fun playVideo(video: VideoItem, queue: List<VideoItem> = _uiState.value.allVideos) {
+    fun playVideo(
+        video: VideoItem,
+        queue: List<VideoItem> = _uiState.value.allVideos,
+        skipPlayerPrepare: Boolean = false
+    ) {
         com.cyos.player.StartupLatencyTracker.markVideoTap(video.uri)
         val stateSnap = _uiState.value
 
@@ -1065,13 +1141,14 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             .ifBlank { video.path.substringBeforeLast('/', "").trim().trimEnd('/') }
             .ifBlank { video.folderId.trim() }
         val normalizedVideoKey = video.path.trim()
-        val restoredBrightness = stateSnap.videoBrightnessMap[normalizedVideoKey]
-            ?: stateSnap.folderBrightnessMap[folderKey]
+        val restoredBrightness = lookupFloatSettingCaseInsensitive(stateSnap.videoBrightnessMap, normalizedVideoKey)
+            ?: lookupFloatSettingCaseInsensitive(stateSnap.folderBrightnessMap, folderKey)
             ?: stateSnap.savedPlayerBrightness
-        val restoredVolume = stateSnap.videoVolumeMap[normalizedVideoKey]
-            ?: stateSnap.folderVolumeMap[folderKey]
+        val restoredVolume = lookupFloatSettingCaseInsensitive(stateSnap.videoVolumeMap, normalizedVideoKey)
+            ?: lookupFloatSettingCaseInsensitive(stateSnap.folderVolumeMap, folderKey)
             ?: stateSnap.savedPlayerVolume
         val savedAudioSelection = stateSnap.videoAudioTrackMap[normalizedVideoKey]
+            ?: stateSnap.videoAudioTrackMap.entries.firstOrNull { it.key.equals(normalizedVideoKey, ignoreCase = true) }?.value
 
         val savedProgress = stateSnap.playbackProgressMap[video.path]
         val savedPos = savedProgress?.lastPositionMs ?: 0L
@@ -1082,28 +1159,30 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             0L
         }
 
-        // Start playback on the warm reused ExoPlayer BEFORE Compose navigation animation runs,
-        // using the exact same codecProfileKey and Xvid-aware selector as VideoPlayerScreen.
-        val codecProfileKey = buildCodecProfileKey(
-            decoderEngineMode = stateSnap.decoderEngineMode,
-            forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate,
-            lowRamShieldEnabled = stateSnap.lowRamShieldEnabled,
-            batterySaverModeEnabled = stateSnap.batterySaverModeEnabled
-        )
-        val (codecSelector, extMode) = resolveCodecSelectorAndExtensionMode(
-            decoderEngineMode = stateSnap.decoderEngineMode,
-            forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate
-        )
-        com.cyos.player.CyosPlayerHolder.prepareOnTap(
-            context = getApplication(),
-            mediaItem = androidx.media3.common.MediaItem.fromUri(video.uri),
-            resumeMs = resumeMs,
-            codecProfileKey = codecProfileKey,
-            mediaCodecSelector = codecSelector,
-            extensionRendererMode = extMode,
-            forceLowRamMode = stateSnap.lowRamShieldEnabled,
-            batterySaverEnabled = stateSnap.batterySaverModeEnabled
-        )
+        if (!skipPlayerPrepare) {
+            // Start playback on the warm reused ExoPlayer BEFORE Compose navigation animation runs,
+            // using the exact same codecProfileKey and Xvid-aware selector as VideoPlayerScreen.
+            val codecProfileKey = buildCodecProfileKey(
+                decoderEngineMode = stateSnap.decoderEngineMode,
+                forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate,
+                lowRamShieldEnabled = stateSnap.lowRamShieldEnabled,
+                batterySaverModeEnabled = stateSnap.batterySaverModeEnabled
+            )
+            val (codecSelector, extMode) = resolveCodecSelectorAndExtensionMode(
+                decoderEngineMode = stateSnap.decoderEngineMode,
+                forceHardwareAccelerationHighBitrate = stateSnap.forceHardwareAccelerationHighBitrate
+            )
+            com.cyos.player.CyosPlayerHolder.prepareOnTap(
+                context = getApplication(),
+                mediaItem = androidx.media3.common.MediaItem.fromUri(video.uri),
+                resumeMs = resumeMs,
+                codecProfileKey = codecProfileKey,
+                mediaCodecSelector = codecSelector,
+                extensionRendererMode = extMode,
+                forceLowRamMode = stateSnap.lowRamShieldEnabled,
+                batterySaverEnabled = stateSnap.batterySaverModeEnabled
+            )
+        }
 
         val updatedFolderLastPlayed = if (stateSnap.stealthPlaybackEnabled) {
             stateSnap.folderLastPlayedMap
@@ -1139,6 +1218,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 playAllSubtitlesSimultaneously = false,
                 subtitleTracks = state.subtitleTracks.map { it.copy(isSelected = false) },
                 subtitlesEnabledByUser = false,
+                activeVideoChapters = emptyList(),
                 miniPlayerVideo = null,
                 isMiniPlayerPlaying = false
             )
@@ -1167,6 +1247,92 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
+     * Updates the active video inside [Screen.Player] when switching Next/Previous in a playlist
+     * without pushing duplicate back-stack entries, clearing stale chapters/external subtitles and
+     * loading the new video's saved brightness & audio metadata so Auto-Skip, Audio Tracks,
+     * FLAG_SECURE, and PiP checks always inspect the live video.
+     */
+    fun switchActivePlaylistVideo(
+        nextVideo: VideoItem,
+        playlistQueue: List<VideoItem> = (uiState.value.currentScreen as? Screen.Player)?.playlistQueue
+            ?: _uiState.value.allVideos
+    ) {
+        val stateSnap = _uiState.value
+        val folderKey = nextVideo.folderPath.trim().trimEnd('/')
+            .ifBlank { nextVideo.path.substringBeforeLast('/', "").trim().trimEnd('/') }
+            .ifBlank { nextVideo.folderId.trim() }
+        val normalizedVideoKey = nextVideo.path.trim()
+        val restoredBrightness = lookupFloatSettingCaseInsensitive(stateSnap.videoBrightnessMap, normalizedVideoKey)
+            ?: lookupFloatSettingCaseInsensitive(stateSnap.folderBrightnessMap, folderKey)
+            ?: stateSnap.savedPlayerBrightness
+        val restoredVolume = lookupFloatSettingCaseInsensitive(stateSnap.videoVolumeMap, normalizedVideoKey)
+            ?: lookupFloatSettingCaseInsensitive(stateSnap.folderVolumeMap, folderKey)
+            ?: stateSnap.savedPlayerVolume
+        val savedAudioSelection = stateSnap.videoAudioTrackMap[normalizedVideoKey]
+            ?: stateSnap.videoAudioTrackMap.entries.firstOrNull { it.key.equals(normalizedVideoKey, ignoreCase = true) }?.value
+
+        val updatedFolderLastPlayed = if (stateSnap.stealthPlaybackEnabled) {
+            stateSnap.folderLastPlayedMap
+        } else {
+            buildMap {
+                putAll(stateSnap.folderLastPlayedMap)
+                if (nextVideo.folderId.isNotBlank()) put(nextVideo.folderId, nextVideo.path)
+                if (nextVideo.folderPath.isNotBlank()) put(nextVideo.folderPath, nextVideo.path)
+            }
+        }
+        val trimmedPath = nextVideo.path.trim()
+        val updatedNewVideoPaths = stateSnap.newVideoPaths.filterNot { it.equals(trimmedPath, ignoreCase = true) }.toSet()
+
+        _uiState.update { state ->
+            state.copy(
+                currentScreen = Screen.Player(
+                    video = nextVideo,
+                    playlistQueue = playlistQueue.ifEmpty { listOf(nextVideo) }
+                ),
+                lastPlayedVideoPath = if (state.stealthPlaybackEnabled) null else nextVideo.path,
+                folderLastPlayedMap = updatedFolderLastPlayed,
+                newVideoPaths = updatedNewVideoPaths,
+                allVideos = if (nextVideo.isNewVideo) {
+                    state.allVideos.map { v ->
+                        if (v.path.trim().equals(trimmedPath, ignoreCase = true)) v.copy(isNewVideo = false) else v
+                    }
+                } else {
+                    state.allVideos
+                },
+                savedPlayerBrightness = restoredBrightness,
+                savedPlayerVolume = restoredVolume,
+                isAudioMuted = savedAudioSelection?.isMuted ?: false,
+                audioTracks = emptyList(),
+                externalSubtitleTracks = emptyList(),
+                externalSubtitleCues = emptyList(),
+                secondaryExternalSubtitleCues = emptyList(),
+                selectedExternalSubtitleTrackIds = emptySet(),
+                playAllSubtitlesSimultaneously = false,
+                subtitleTracks = emptyList(),
+                subtitlesEnabledByUser = false,
+                activeVideoChapters = emptyList()
+            )
+        }
+
+        val stealth = stateSnap.stealthPlaybackEnabled
+        viewModelScope.launch(Dispatchers.IO) {
+            if (trimmedPath.isNotEmpty()) {
+                settingsRepository.clearNewVideoPath(trimmedPath)
+            }
+            settingsRepository.setSubtitlesEnabledByUser(false)
+            if (!stealth) {
+                settingsRepository.setLastPlayedVideoPath(nextVideo.path)
+                if (nextVideo.folderId.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(nextVideo.folderId, nextVideo.path)
+                }
+                if (nextVideo.folderPath.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(nextVideo.folderPath, nextVideo.path)
+                }
+            }
+        }
+    }
+
+    /**
      * Runs non-critical post-first-frame work (sidecar subtitle scan + parsing & folder last-played sync)
      * strictly on Dispatchers.IO AFTER Player.Listener.onRenderedFirstFrame fires.
      */
@@ -1174,9 +1340,43 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         deferredPostFrameJob?.cancel()
         deferredPostFrameJob = viewModelScope.launch(Dispatchers.IO) {
             discoverSidecarSubtitlesForVideo(video)
+            // Extract real embedded MKV/MP4 or sidecar chapter markers for Auto-Skip Intros & Credits
+            val extractedChapters = runCatching {
+                com.cyosplay.player.util.MediaChapterExtractor.extractChaptersForLocalVideo(
+                    filePath = video.path,
+                    totalDurationMs = video.durationMs
+                )
+            }.getOrDefault(emptyList())
+            if (extractedChapters.isNotEmpty()) {
+                mergeRuntimeChapters(video.path, extractedChapters)
+            }
             if (!_uiState.value.stealthPlaybackEnabled && video.folderId.isNotBlank()) {
                 settingsRepository.saveLastPlayedVideoForFolder(video.folderId, video.path)
             }
+        }
+    }
+
+    /**
+     * Merges extracted container/sidecar/ID3 chapter markers into UI state if [videoPath]
+     * is still the active playing video (deduplicating by start timestamp).
+     */
+    fun mergeRuntimeChapters(
+        videoPath: String,
+        chapters: List<com.cyosplay.player.util.PlayerGestureControlHelper.ChapterSegment>
+    ) {
+        if (chapters.isEmpty()) return
+        val normalizedTarget = videoPath.trim()
+        _uiState.update { state ->
+            val currentVideo = (state.currentScreen as? Screen.Player)?.video ?: state.miniPlayerVideo
+            if (currentVideo != null && normalizedTarget.isNotEmpty() &&
+                !currentVideo.path.trim().equals(normalizedTarget, ignoreCase = true)
+            ) {
+                return@update state
+            }
+            val merged = (state.activeVideoChapters + chapters)
+                .distinctBy { it.startMs to it.title.lowercase() }
+                .sortedBy { it.startMs }
+            state.copy(activeVideoChapters = merged)
         }
     }
 
@@ -1271,14 +1471,32 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Expands the floating Mini-Player back into the full-screen video player at the current position.
+     * Expands the floating Mini-Player back into the full-screen video player gaplessly when
+     * the shared ExoPlayer already holds [miniPlayerVideo], avoiding any re-buffer or backward jump.
      */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun expandMiniPlayer() {
         val state = _uiState.value
         val video = state.miniPlayerVideo ?: return
         val queue = state.miniPlayerQueue.ifEmpty { listOf(video) }
-        val safeDur = state.miniPlayerDurationMs.coerceAtLeast(video.durationMs.coerceAtLeast(1000L))
-        val safePos = state.miniPlayerPositionMs.coerceIn(0L, safeDur)
+        val livePlayer = com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+        val liveUri = runCatching { livePlayer?.currentMediaItem?.localConfiguration?.uri?.toString() }.getOrNull()
+        val isGaplessHandover = livePlayer != null &&
+            liveUri == video.uri.toString() &&
+            runCatching { livePlayer.playbackState != androidx.media3.common.Player.STATE_IDLE }.getOrDefault(false)
+
+        val liveDur = if (isGaplessHandover) {
+            runCatching { livePlayer!!.duration.takeIf { it > 0L } }.getOrNull()
+        } else {
+            null
+        }
+        val livePos = if (isGaplessHandover) {
+            runCatching { livePlayer!!.currentPosition.takeIf { it > 0L } }.getOrNull()
+        } else {
+            null
+        }
+        val safeDur = (liveDur ?: state.miniPlayerDurationMs).coerceAtLeast(video.durationMs.coerceAtLeast(1000L))
+        val safePos = (livePos ?: state.miniPlayerPositionMs).coerceIn(0L, safeDur)
         savePlaybackProgress(video.path, safePos, safeDur)
         _uiState.update {
             it.copy(
@@ -1286,7 +1504,13 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 isMiniPlayerPlaying = false
             )
         }
-        playVideo(video, queue)
+        playVideo(video, queue, skipPlayerPrepare = isGaplessHandover)
+    }
+
+    fun syncMiniPlayerPlayingState(playing: Boolean) {
+        val state = _uiState.value
+        if (state.miniPlayerVideo == null || state.isMiniPlayerPlaying == playing) return
+        _uiState.update { it.copy(isMiniPlayerPlaying = playing) }
     }
 
     fun toggleMiniPlayerPlayPause() {
@@ -1363,10 +1587,17 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
-    fun dragMiniPlayerByDelta(dx: Float, dy: Float) {
+    fun dragMiniPlayerByDelta(
+        dx: Float,
+        dy: Float,
+        maxHalfX: Float = 2500f,
+        maxUpY: Float = 2500f
+    ) {
         if (!dx.isFinite() || !dy.isFinite()) return
-        val clampedX = (_uiState.value.miniPlayerOffsetX + dx).coerceIn(-2500f, 2500f)
-        val clampedY = (_uiState.value.miniPlayerOffsetY + dy).coerceIn(-2500f, 2500f)
+        val safeMaxX = maxHalfX.coerceAtLeast(0f)
+        val safeMaxUpY = maxUpY.coerceAtLeast(0f)
+        val clampedX = (_uiState.value.miniPlayerOffsetX + dx).coerceIn(-safeMaxX, safeMaxX)
+        val clampedY = (_uiState.value.miniPlayerOffsetY + dy).coerceIn(-safeMaxUpY, 0f)
         val preset = if (kotlin.math.abs(clampedX) < 1f && kotlin.math.abs(clampedY) < 1f) {
             MiniPlayerPositionPreset.BOTTOM_CENTER
         } else {
@@ -2004,8 +2235,21 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         val startNs = System.nanoTime()
         val totalBytes = targets.sumOf { it.sizeBytes.coerceAtLeast(1L) }
 
+        if (operation != HoldClipboardOperation.COPY) {
+            targets.forEach { target ->
+                releasePlayerHandleIfMatching(target.uri, target.path)
+            }
+        }
+
+        refreshLibraryJob?.cancel()
         _uiState.update {
             it.copy(
+                isFileOperationBusy = true,
+                fileOperationStatusText = if (operation == HoldClipboardOperation.COPY) {
+                    "Copying ${targets.size} video(s) to $finalFolderName…"
+                } else {
+                    "Moving ${targets.size} video(s) to $finalFolderName…"
+                },
                 fileTransferProgress = com.cyosplay.player.data.model.FileTransferProgress(
                     operation = operation,
                     completedFiles = 0,
@@ -2019,180 +2263,191 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             )
         }
 
-        if (operation == HoldClipboardOperation.COPY) {
-            val copied = videoRepository.copyVideosToFolder(
-                videosToCopy = targets,
-                targetFolderPath = finalFolderPath,
-                targetFolderName = finalFolderName,
-                isRemovableSd = destination.isRemovableSd || CryptoSecurityManager.isRemovableSdCardPath(finalFolderPath)
-            ) { completed, total, bytesDone, bytesTotal, speed, curName ->
-                _uiState.update {
-                    it.copy(
-                        fileTransferProgress = com.cyosplay.player.data.model.FileTransferProgress(
-                            operation = operation,
-                            completedFiles = completed,
-                            totalFiles = total,
-                            bytesTransferred = bytesDone,
-                            totalBytes = bytesTotal,
-                            speedMbPerSec = speed,
-                            currentFileName = curName,
-                            destinationFolderName = finalFolderName
-                        )
-                    )
-                }
-            }
-            val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
-            if (copied.isNotEmpty()) {
-                copied.forEach { settingsRepository.markVideoPathAsNew(it.path) }
-                val normFolder = finalFolderPath.trim().trimEnd('/').lowercase()
-                val nextCount = (settingsRepository.getFolderNewVideoCounts()[normFolder] ?: 0) + copied.size
-                settingsRepository.setFolderNewVideoCount(finalFolderPath, nextCount)
-                settingsRepository.markFolderHasNewVideo(finalFolderPath)
-            }
-            _uiState.update { state ->
-                val flaggedCopied = copied.map { it.copy(isNewVideo = true) }
-                val copiedPaths = flaggedCopied.map { it.path.lowercase() }.toSet()
-                val mergedVideos = sortVideos(
-                    flaggedCopied + state.allVideos.filterNot { it.path.lowercase() in copiedPaths },
-                    state.videoSortOption,
-                    state.videoSortDirection
-                )
-                val mergedFolders = sortFolders(
-                    videoRepository.groupVideosIntoFolders(mergedVideos).map { folder ->
-                        val newInFolder = folder.videos.count { it.isNewVideo }
-                        val hasNew = folder.hasNewVideo || newInFolder > 0
-                        folder.copy(
-                            hasNewVideo = hasNew,
-                            newVideoCount = if (hasNew) maxOf(folder.newVideoCount, newInFolder, 1) else 0,
-                            isNew = folder.bucketId in state.unseenNewFolderIds
-                        )
-                    },
-                    state.folderSortOption,
-                    state.folderSortDirection
-                )
-                state.copy(
-                    allVideos = mergedVideos,
-                    folders = mergedFolders,
-                    isBrowserSelectionMode = false,
-                    selectedFolderPaths = emptySet(),
-                    selectedVideoPaths = emptySet(),
-                    holdContextVideos = emptyList(),
-                    showDestinationPickerDialog = false,
-                    showHoldActionSheet = false,
-                    pendingTransferOperation = null,
-                    clipboardState = null,
-                    fileTransferProgress = null,
-                    statusBannerMessage = "Fast-copied ${copied.size} video(s) to $finalFolderName (${elapsedMs}ms)"
-                )
-            }
-        } else {
-            targets.forEach { target ->
-                releasePlayerHandleIfMatching(target.uri, target.path)
-            }
-            var moveErrorMessage: String? = null
-            val moved = videoRepository.moveVideosToFolder(
-                videosToMove = targets,
-                targetFolderPath = finalFolderPath,
-                targetFolderName = finalFolderName,
-                isRemovableSd = destination.isRemovableSd || CryptoSecurityManager.isRemovableSdCardPath(finalFolderPath),
-                onMovedItem = { removedSource, addedDest ->
-                    _uiState.update { state ->
-                        val updatedList = state.allVideos.toMutableList()
-                        val pos = updatedList.indexOfFirst {
-                            it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
-                        }
-                        if (pos >= 0) {
-                            updatedList.removeAt(pos)
-                        }
-                        updatedList.removeAll {
-                            it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
-                        }
-                        updatedList.add(0, addedDest)
+        val isRemovableSdDest = destination.isRemovableSd || CryptoSecurityManager.isRemovableSdCardPath(finalFolderPath)
 
-                        val updatedFolders = state.folders.mapNotNull { folder ->
-                            if (folder.path.equals(removedSource.folderPath, ignoreCase = true) || folder.id == removedSource.folderId) {
-                                val remaining = folder.videos.toMutableList()
-                                val fPos = remaining.indexOfFirst {
-                                    it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
-                                }
-                                if (fPos >= 0) {
-                                    remaining.removeAt(fPos)
-                                }
-                                remaining.removeAll {
-                                    it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
-                                }
-                                if (remaining.isEmpty()) null else folder.copy(videos = remaining)
-                            } else {
-                                folder
-                            }
+        viewModelScope.launch {
+            if (operation == HoldClipboardOperation.COPY) {
+                val copied = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    val result = videoRepository.copyVideosToFolder(
+                        videosToCopy = targets,
+                        targetFolderPath = finalFolderPath,
+                        targetFolderName = finalFolderName,
+                        isRemovableSd = isRemovableSdDest
+                    ) { completed, total, bytesDone, bytesTotal, speed, curName ->
+                        _uiState.update {
+                            it.copy(
+                                fileTransferProgress = com.cyosplay.player.data.model.FileTransferProgress(
+                                    operation = operation,
+                                    completedFiles = completed,
+                                    totalFiles = total,
+                                    bytesTransferred = bytesDone,
+                                    totalBytes = bytesTotal,
+                                    speedMbPerSec = speed,
+                                    currentFileName = curName,
+                                    destinationFolderName = finalFolderName
+                                )
+                            )
                         }
-                        state.copy(
-                            allVideos = updatedList,
-                            folders = updatedFolders
-                        )
                     }
-                },
-                onError = { err ->
-                    moveErrorMessage = err
+                    if (result.isNotEmpty()) {
+                        result.forEach { settingsRepository.markVideoPathAsNew(it.path) }
+                        val normFolder = finalFolderPath.trim().trimEnd('/').lowercase()
+                        val nextCount = (settingsRepository.getFolderNewVideoCounts()[normFolder] ?: 0) + result.size
+                        settingsRepository.setFolderNewVideoCount(finalFolderPath, nextCount)
+                        settingsRepository.markFolderHasNewVideo(finalFolderPath)
+                    }
+                    result
                 }
-            ) { completed, total, bytesDone, bytesTotal, speed, curName ->
+                val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
+                _uiState.update { curState ->
+                    val flaggedCopied = copied.map { it.copy(isNewVideo = true) }
+                    val copiedPaths = flaggedCopied.map { it.path.lowercase() }.toSet()
+                    val mergedVideos = sortVideos(
+                        flaggedCopied + curState.allVideos.filterNot { it.path.lowercase() in copiedPaths },
+                        curState.videoSortOption,
+                        curState.videoSortDirection
+                    )
+                    val mergedFolders = sortFolders(
+                        videoRepository.groupVideosIntoFolders(mergedVideos).map { folder ->
+                            val newInFolder = folder.videos.count { it.isNewVideo }
+                            val hasNew = folder.hasNewVideo || newInFolder > 0
+                            folder.copy(
+                                hasNewVideo = hasNew,
+                                newVideoCount = if (hasNew) maxOf(folder.newVideoCount, newInFolder, 1) else 0,
+                                isNew = folder.bucketId in curState.unseenNewFolderIds
+                            )
+                        },
+                        curState.folderSortOption,
+                        curState.folderSortDirection
+                    )
+                    curState.copy(
+                        allVideos = mergedVideos,
+                        folders = mergedFolders,
+                        isBrowserSelectionMode = false,
+                        selectedFolderPaths = emptySet(),
+                        selectedVideoPaths = emptySet(),
+                        holdContextVideos = emptyList(),
+                        showDestinationPickerDialog = false,
+                        showHoldActionSheet = false,
+                        pendingTransferOperation = null,
+                        clipboardState = null,
+                        fileTransferProgress = null,
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = "Fast-copied ${copied.size} video(s) to $finalFolderName (${elapsedMs}ms)"
+                    )
+                }
+            } else {
+                var moveErrorMessage: String? = null
+                val moved = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    val result = videoRepository.moveVideosToFolder(
+                        videosToMove = targets,
+                        targetFolderPath = finalFolderPath,
+                        targetFolderName = finalFolderName,
+                        isRemovableSd = isRemovableSdDest,
+                        onMovedItem = { removedSource, addedDest ->
+                            _uiState.update { curState ->
+                                val updatedList = curState.allVideos.toMutableList()
+                                val pos = updatedList.indexOfFirst {
+                                    it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
+                                }
+                                if (pos >= 0) {
+                                    updatedList.removeAt(pos)
+                                }
+                                updatedList.removeAll {
+                                    it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
+                                }
+                                updatedList.add(0, addedDest)
+
+                                val updatedFolders = curState.folders.mapNotNull { folder ->
+                                    if (folder.path.equals(removedSource.folderPath, ignoreCase = true) || folder.id == removedSource.folderId) {
+                                        val remaining = folder.videos.toMutableList()
+                                        val fPos = remaining.indexOfFirst {
+                                            it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
+                                        }
+                                        if (fPos >= 0) {
+                                            remaining.removeAt(fPos)
+                                        }
+                                        remaining.removeAll {
+                                            it.id == removedSource.id || it.path.equals(removedSource.path, ignoreCase = true)
+                                        }
+                                        if (remaining.isEmpty()) null else folder.copy(videos = remaining)
+                                    } else {
+                                        folder
+                                    }
+                                }
+                                curState.copy(
+                                    allVideos = updatedList,
+                                    folders = updatedFolders
+                                )
+                            }
+                        },
+                        onError = { err ->
+                            moveErrorMessage = err
+                        }
+                    ) { completed, total, bytesDone, bytesTotal, speed, curName ->
+                        _uiState.update {
+                            it.copy(
+                                fileTransferProgress = com.cyosplay.player.data.model.FileTransferProgress(
+                                    operation = operation,
+                                    completedFiles = completed,
+                                    totalFiles = total,
+                                    bytesTransferred = bytesDone,
+                                    totalBytes = bytesTotal,
+                                    speedMbPerSec = speed,
+                                    currentFileName = curName,
+                                    destinationFolderName = finalFolderName
+                                )
+                            )
+                        }
+                    }
+                    if (result.isNotEmpty()) {
+                        result.forEach { movedItem ->
+                            val oldSource = targets.firstOrNull {
+                                it.id == movedItem.id || it.displayName.equals(movedItem.displayName, ignoreCase = true)
+                            }
+                            if (oldSource != null) {
+                                settingsRepository.relinkMovedVideoReferences(oldSource.path, movedItem.path)
+                                playlistRepository.relinkMovedVideoReferences(oldSource.path, movedItem.path)
+                            }
+                            settingsRepository.markVideoPathAsNew(movedItem.path)
+                        }
+                        val normFolder = finalFolderPath.trim().trimEnd('/').lowercase()
+                        val nextCount = (settingsRepository.getFolderNewVideoCounts()[normFolder] ?: 0) + result.size
+                        settingsRepository.setFolderNewVideoCount(finalFolderPath, nextCount)
+                        settingsRepository.markFolderHasNewVideo(finalFolderPath)
+                    }
+                    result
+                }
+                val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
+                val statusMsg = when {
+                    moved.isEmpty() && moveErrorMessage != null -> "Move failed: $moveErrorMessage"
+                    moved.isEmpty() -> "Move failed: Could not move media file to destination"
+                    moveErrorMessage != null -> "Moved ${moved.size} video(s) to $finalFolderName • Move failed for duplicate: $moveErrorMessage"
+                    else -> "Fast-moved ${moved.size} video(s) to $finalFolderName (${elapsedMs}ms)"
+                }
                 _uiState.update {
                     it.copy(
-                        fileTransferProgress = com.cyosplay.player.data.model.FileTransferProgress(
-                            operation = operation,
-                            completedFiles = completed,
-                            totalFiles = total,
-                            bytesTransferred = bytesDone,
-                            totalBytes = bytesTotal,
-                            speedMbPerSec = speed,
-                            currentFileName = curName,
-                            destinationFolderName = finalFolderName
-                        )
+                        isBrowserSelectionMode = false,
+                        selectedFolderPaths = emptySet(),
+                        selectedVideoPaths = emptySet(),
+                        holdContextVideos = emptyList(),
+                        showDestinationPickerDialog = false,
+                        showHoldActionSheet = false,
+                        pendingTransferOperation = null,
+                        pendingBatchMoveDestination = null,
+                        pendingBatchMoveCustomSubfolder = "",
+                        pendingMovePermissionRequest = null,
+                        clipboardState = null,
+                        fileTransferProgress = null,
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = statusMsg
                     )
                 }
             }
-            val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
-            if (moved.isNotEmpty()) {
-                moved.forEach { movedItem ->
-                    val oldSource = targets.firstOrNull {
-                        it.id == movedItem.id || it.displayName.equals(movedItem.displayName, ignoreCase = true)
-                    }
-                    if (oldSource != null) {
-                        settingsRepository.relinkMovedVideoReferences(oldSource.path, movedItem.path)
-                        playlistRepository.relinkMovedVideoReferences(oldSource.path, movedItem.path)
-                    }
-                    settingsRepository.markVideoPathAsNew(movedItem.path)
-                }
-                val normFolder = finalFolderPath.trim().trimEnd('/').lowercase()
-                val nextCount = (settingsRepository.getFolderNewVideoCounts()[normFolder] ?: 0) + moved.size
-                settingsRepository.setFolderNewVideoCount(finalFolderPath, nextCount)
-                settingsRepository.markFolderHasNewVideo(finalFolderPath)
-            }
-            val statusMsg = when {
-                moved.isEmpty() && moveErrorMessage != null -> "Move failed: $moveErrorMessage"
-                moved.isEmpty() -> "Move failed: Could not move media file to destination"
-                moveErrorMessage != null -> "Moved ${moved.size} video(s) to $finalFolderName • Move failed for duplicate: $moveErrorMessage"
-                else -> "Fast-moved ${moved.size} video(s) to $finalFolderName (${elapsedMs}ms)"
-            }
-            _uiState.update {
-                it.copy(
-                    isBrowserSelectionMode = false,
-                    selectedFolderPaths = emptySet(),
-                    selectedVideoPaths = emptySet(),
-                    holdContextVideos = emptyList(),
-                    showDestinationPickerDialog = false,
-                    showHoldActionSheet = false,
-                    pendingTransferOperation = null,
-                    pendingBatchMoveDestination = null,
-                    pendingBatchMoveCustomSubfolder = "",
-                    pendingMovePermissionRequest = null,
-                    clipboardState = null,
-                    fileTransferProgress = null,
-                    statusBannerMessage = statusMsg
-                )
-            }
+            refreshLibrary()
         }
-        refreshLibrary()
     }
 
     /**
@@ -2507,34 +2762,74 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun moveVideosDirectlyToPrivateVault(videos: List<VideoItem> = getActiveHoldTargetVideos()) {
         if (videos.isEmpty()) return
         val isDecoy = _uiState.value.vaultAuthState == VaultAuthState.UNLOCKED_DECOY
-        val succeededPaths = mutableSetOf<String>()
-        videos.forEach { video ->
-            val entry = vaultManager.moveVideoToVault(video, isDecoyEntry = isDecoy)
-            if (entry != null) {
-                succeededPaths.add(video.path)
-            }
-        }
-        if (succeededPaths.isNotEmpty()) {
-            videoRepository.removeVideosFromCatalog(succeededPaths, shredFilesOnDisk = true)
-        }
-        val failedCount = videos.size - succeededPaths.size
-        val statusMsg = when {
-            succeededPaths.isEmpty() -> "Vault encryption failed: Source video file missing or unreadable"
-            failedCount > 0 -> "Encrypted ${succeededPaths.size} video(s) to Vault ($failedCount skipped: source missing)"
-            else -> "Encrypted & moved ${succeededPaths.size} video(s) to Private Vault"
-        }
+        videos.forEach { releasePlayerHandleIfMatching(it.uri, it.path) }
+        refreshLibraryJob?.cancel()
         _uiState.update {
             it.copy(
-                selectedVideoPaths = emptySet(),
-                holdContextVideos = emptyList(),
-                showHoldActionSheet = false,
-                showDestinationPickerDialog = false,
-                vaultEntries = vaultManager.getVaultEntries(isDecoy),
-                vaultErrorMessage = if (succeededPaths.isEmpty()) statusMsg else null,
-                statusBannerMessage = statusMsg
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Encrypting ${videos.size} video(s) into Private Vault…"
             )
         }
-        refreshLibrary()
+        viewModelScope.launch {
+            val moveResults = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                videos.map { video ->
+                    video to vaultManager.moveVideoToVaultWithDeleteRequest(video, isDecoyEntry = isDecoy)
+                }
+            }
+            val succeededPaths = moveResults
+                .filter { (_, result) -> result.entry != null }
+                .map { (video, _) -> video.path }
+                .toSet()
+            val urisNeedingScopedDelete = moveResults
+                .mapNotNull { (_, result) -> result.pendingSourceDeleteUri }
+                .distinct()
+
+            var pendingDeleteSender: android.content.IntentSender? = moveResults
+                .firstNotNullOfOrNull { (_, result) -> result.pendingSourceDeleteIntentSender }
+            if (pendingDeleteSender == null && urisNeedingScopedDelete.isNotEmpty() && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                pendingDeleteSender = runCatching {
+                    android.provider.MediaStore.createDeleteRequest(
+                        appContext.contentResolver,
+                        urisNeedingScopedDelete
+                    ).intentSender
+                }.getOrNull()
+            }
+
+            if (succeededPaths.isNotEmpty()) {
+                kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    videoRepository.removeVideosFromCatalog(succeededPaths, shredFilesOnDisk = false)
+                }
+            }
+            val updatedEntries = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                vaultManager.getVaultEntries(isDecoy)
+            }
+            val failedCount = videos.size - succeededPaths.size
+            val statusMsg = when {
+                succeededPaths.isEmpty() -> "Vault encryption failed: Source video file missing or unreadable"
+                pendingDeleteSender != null -> "Encrypted ${succeededPaths.size} video(s) to Vault — confirm deleting the unencrypted original from gallery"
+                failedCount > 0 -> "Encrypted ${succeededPaths.size} video(s) to Vault ($failedCount skipped: source missing)"
+                else -> "Encrypted & moved ${succeededPaths.size} video(s) to Private Vault"
+            }
+            _uiState.update {
+                it.copy(
+                    selectedVideoPaths = emptySet(),
+                    holdContextVideos = if (pendingDeleteSender != null) {
+                        videos.filter { v -> v.path in succeededPaths }
+                    } else {
+                        emptyList()
+                    },
+                    showHoldActionSheet = false,
+                    showDestinationPickerDialog = false,
+                    pendingDeleteIntentSender = pendingDeleteSender ?: it.pendingDeleteIntentSender,
+                    vaultEntries = updatedEntries,
+                    vaultErrorMessage = if (succeededPaths.isEmpty()) statusMsg else null,
+                    isFileOperationBusy = false,
+                    fileOperationStatusText = null,
+                    statusBannerMessage = statusMsg
+                )
+            }
+            refreshLibrary()
+        }
     }
 
     fun collectAllTargetDeleteUris(): List<Uri> {
@@ -2988,40 +3283,65 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     // --- Recycle Bin Actions ---
 
     fun restoreRecycleBinItem(recycleId: String) {
-        val restored = recycleBinRepository.restoreFromRecycleBin(recycleId)
-        if (restored != null) {
-            val ext = java.io.File(restored.originalPath).extension.ifBlank { "mp4" }
-            val currentCatalog = videoRepository.getOrCreateManagedCatalog().toMutableList()
-            if (currentCatalog.none { it.path == restored.originalPath }) {
-                currentCatalog.add(
-                    0,
-                    VideoItem(
-                        id = restored.originalVideoId,
-                        title = restored.title,
-                        displayName = "${restored.title}.$ext",
-                        uri = Uri.parse(restored.originalUriString.ifBlank { "file://${restored.originalPath}" }),
-                        path = restored.originalPath,
-                        sizeBytes = restored.sizeBytes,
-                        durationMs = restored.durationMs,
-                        dateModifiedSeconds = System.currentTimeMillis() / 1000L,
-                        width = restored.width,
-                        height = restored.height,
-                        mimeType = VideoRepository.resolveVideoMimeType(ext),
-                        folderId = restored.folderName.lowercase().hashCode().toString(),
-                        folderName = restored.folderName,
-                        folderPath = restored.originalPath.substringBeforeLast('/', "/storage/emulated/0/Movies")
-                    )
-                )
-                videoRepository.saveManagedCatalog(currentCatalog)
+        refreshLibraryJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Restoring video from Recycle Bin…"
+            )
+        }
+        viewModelScope.launch {
+            val restored = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val res = recycleBinRepository.restoreFromRecycleBin(recycleId)
+                if (res != null) {
+                    val ext = java.io.File(res.originalPath).extension.ifBlank { "mp4" }
+                    val currentCatalog = videoRepository.getOrCreateManagedCatalog().toMutableList()
+                    if (currentCatalog.none { it.path == res.originalPath }) {
+                        currentCatalog.add(
+                            0,
+                            VideoItem(
+                                id = res.originalVideoId,
+                                title = res.title,
+                                displayName = "${res.title}.$ext",
+                                uri = Uri.parse(res.originalUriString.ifBlank { "file://${res.originalPath}" }),
+                                path = res.originalPath,
+                                sizeBytes = res.sizeBytes,
+                                durationMs = res.durationMs,
+                                dateModifiedSeconds = System.currentTimeMillis() / 1000L,
+                                width = res.width,
+                                height = res.height,
+                                mimeType = VideoRepository.resolveVideoMimeType(ext),
+                                folderId = res.folderName.lowercase().hashCode().toString(),
+                                folderName = res.folderName,
+                                folderPath = res.originalPath.substringBeforeLast('/', "/storage/emulated/0/Movies")
+                            )
+                        )
+                        videoRepository.saveManagedCatalog(currentCatalog)
+                    }
+                }
+                res
             }
-            _uiState.update { it.copy(statusBannerMessage = "Restored \"${restored.title}\"") }
-            refreshLibrary()
-        } else {
-            _uiState.update {
-                it.copy(
-                    recycleBinItems = recycleBinRepository.getRecycleBinItems(),
-                    statusBannerMessage = "Decryption failed: Encrypted recycle bin item kept intact to prevent data loss"
-                )
+            if (restored != null) {
+                _uiState.update {
+                    it.copy(
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = "Restored \"${restored.title}\""
+                    )
+                }
+                refreshLibrary()
+            } else {
+                val remaining = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    recycleBinRepository.getRecycleBinItems()
+                }
+                _uiState.update {
+                    it.copy(
+                        recycleBinItems = remaining,
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = "Decryption failed: Encrypted recycle bin item kept intact to prevent data loss"
+                    )
+                }
             }
         }
     }
@@ -3094,58 +3414,85 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 releasePlayerHandleIfMatching(uri, item.originalPath)
             }
         }
-        com.cyosplay.player.util.MediaStoreFileHelper.completePendingRecoverableDeletes(appContext)
-
-        val beforePaths = currentItems.map { it.originalPath }.toSet()
-        recycleBinRepository.emptyRecycleBinZeroTrace()
-        val remainingItems = recycleBinRepository.getRecycleBinItems()
-        val remainingPaths = remainingItems.map { it.originalPath }.toSet()
-        val verifiedDeletedPaths = beforePaths - remainingPaths
-
-        if (verifiedDeletedPaths.isNotEmpty()) {
-            videoRepository.removeVideosFromCatalog(verifiedDeletedPaths, shredFilesOnDisk = true)
-            settingsRepository.clearCachedReferencesForVideoPaths(verifiedDeletedPaths)
-            playlistRepository.removeDeletedVideoPaths(verifiedDeletedPaths)
-        }
-
-        if (remainingItems.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val remainingIds = remainingItems.map { it.recycleId }.toSet()
-            val contentUris = recycleBinRepository.resolveTargetUrisForRecycleBinItems(remainingIds)
-                .filter { it.scheme.equals("content", ignoreCase = true) }
-            if (contentUris.isNotEmpty()) {
-                runCatching {
-                    val pendingIntent = MediaStore.createDeleteRequest(appContext.contentResolver, contentUris)
-                    _uiState.update { state ->
-                        state.copy(
-                            recycleBinItems = remainingItems,
-                            allVideos = state.allVideos.filterNot { item ->
-                                verifiedDeletedPaths.any { it.equals(item.path, ignoreCase = true) }
-                            },
-                            pendingRecycleBinDeleteIds = remainingIds,
-                            pendingDeleteIntentSender = pendingIntent.intentSender,
-                            statusBannerMessage = null
-                        )
-                    }
-                    return
-                }
-            }
-        }
-
-        _uiState.update { state ->
-            state.copy(
-                recycleBinItems = remainingItems,
-                allVideos = state.allVideos.filterNot { item ->
-                    verifiedDeletedPaths.any { it.equals(item.path, ignoreCase = true) }
-                },
-                playlists = playlistRepository.getPlaylists(),
-                favoriteVideoPaths = playlistRepository.getFavoriteVideoPaths(),
-                playbackProgressMap = settingsRepository.getAllPlaybackProgress(),
-                pendingRecycleBinDeleteIds = emptySet(),
-                pendingDeleteIntentSender = null,
-                statusBannerMessage = null
+        refreshLibraryJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Shredding Recycle Bin (${currentItems.size} item(s))…"
             )
         }
-        refreshLibrary()
+        viewModelScope.launch {
+            val beforePaths = currentItems.map { it.originalPath }.toSet()
+            val outcome = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                com.cyosplay.player.util.MediaStoreFileHelper.completePendingRecoverableDeletes(appContext)
+                recycleBinRepository.emptyRecycleBinZeroTrace()
+                val remainingItems = recycleBinRepository.getRecycleBinItems()
+                val remainingPaths = remainingItems.map { it.originalPath }.toSet()
+                val verifiedDeletedPaths = beforePaths - remainingPaths
+
+                if (verifiedDeletedPaths.isNotEmpty()) {
+                    videoRepository.removeVideosFromCatalog(verifiedDeletedPaths, shredFilesOnDisk = true)
+                    settingsRepository.clearCachedReferencesForVideoPaths(verifiedDeletedPaths)
+                    playlistRepository.removeDeletedVideoPaths(verifiedDeletedPaths)
+                }
+                Triple(remainingItems, verifiedDeletedPaths, playlistRepository.getPlaylists())
+            }
+            val remainingItems = outcome.first
+            val verifiedDeletedPaths = outcome.second
+            val updatedPlaylists = outcome.third
+
+            if (remainingItems.isNotEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val remainingIds = remainingItems.map { it.recycleId }.toSet()
+                val contentUris = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    recycleBinRepository.resolveTargetUrisForRecycleBinItems(remainingIds)
+                        .filter { it.scheme.equals("content", ignoreCase = true) }
+                }
+                if (contentUris.isNotEmpty()) {
+                    runCatching {
+                        val pendingIntent = MediaStore.createDeleteRequest(appContext.contentResolver, contentUris)
+                        _uiState.update { state ->
+                            state.copy(
+                                recycleBinItems = remainingItems,
+                                allVideos = state.allVideos.filterNot { item ->
+                                    verifiedDeletedPaths.any { it.equals(item.path, ignoreCase = true) }
+                                },
+                                pendingRecycleBinDeleteIds = remainingIds,
+                                pendingDeleteIntentSender = pendingIntent.intentSender,
+                                isFileOperationBusy = false,
+                                fileOperationStatusText = null,
+                                statusBannerMessage = null
+                            )
+                        }
+                        return@launch
+                    }
+                }
+            }
+
+            val updatedFavs = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                playlistRepository.getFavoriteVideoPaths()
+            }
+            val updatedProgress = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                settingsRepository.getAllPlaybackProgress()
+            }
+
+            _uiState.update { state ->
+                state.copy(
+                    recycleBinItems = remainingItems,
+                    allVideos = state.allVideos.filterNot { item ->
+                        verifiedDeletedPaths.any { it.equals(item.path, ignoreCase = true) }
+                    },
+                    playlists = updatedPlaylists,
+                    favoriteVideoPaths = updatedFavs,
+                    playbackProgressMap = updatedProgress,
+                    pendingRecycleBinDeleteIds = emptySet(),
+                    pendingDeleteIntentSender = null,
+                    isFileOperationBusy = false,
+                    fileOperationStatusText = null,
+                    statusBannerMessage = null
+                )
+            }
+            refreshLibrary()
+        }
     }
 
     /**
@@ -3223,8 +3570,22 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         startOrResetVaultAutoLockTimer()
     }
 
-    fun unlockVaultWithPin(pin: String) {
-        val remainingLockoutMs = CryptoSecurityManager.getLockoutRemainingMs(appContext)
+    /**
+     * Verifies the Vault PIN (and performs any 3rd-attempt atomic key rotation) strictly on Dispatchers.IO
+     * so PBKDF2 hashing and multi-GB Vault re-encryption never block the Main UI thread.
+     */
+    fun unlockVaultWithPin(pin: String): kotlinx.coroutines.Job {
+        val candidate = pin.trim()
+        return viewModelScope.launch {
+            unlockVaultWithPinSuspend(candidate)
+        }
+    }
+
+    suspend fun unlockVaultWithPinSuspend(pin: String) {
+        val trimmed = pin.trim()
+        val remainingLockoutMs = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            CryptoSecurityManager.getLockoutRemainingMs(appContext)
+        }
         if (remainingLockoutMs > 0L) {
             val sec = ((remainingLockoutMs + 999L) / 1000L).coerceAtLeast(1L)
             _uiState.update {
@@ -3235,26 +3596,18 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        if (settingsRepository.verifyVaultPin(pin.trim())) {
-            CryptoSecurityManager.resetCrackAttempts(appContext)
+        val realMatched = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            settingsRepository.verifyVaultPin(trimmed)
+        }
+        if (realMatched) {
+            val entries = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                CryptoSecurityManager.resetCrackAttempts(appContext)
+                vaultManager.getVaultEntries(isDecoySession = false)
+            }
             _uiState.update {
                 it.copy(
                     vaultAuthState = VaultAuthState.UNLOCKED_REAL,
-                    vaultEntries = vaultManager.getVaultEntries(isDecoySession = false),
-                    vaultErrorMessage = null,
-                    failedCrackAttempts = 0,
-                    vaultAutoLockRemainingSeconds = VAULT_AUTO_LOCK_SECONDS
-                )
-            }
-            startOrResetVaultAutoLockTimer()
-            return
-        }
-        if (settingsRepository.verifyDecoyVaultPin(pin.trim())) {
-            CryptoSecurityManager.resetCrackAttempts(appContext)
-            _uiState.update {
-                it.copy(
-                    vaultAuthState = VaultAuthState.UNLOCKED_DECOY,
-                    vaultEntries = vaultManager.getVaultEntries(isDecoySession = true),
+                    vaultEntries = entries,
                     vaultErrorMessage = null,
                     failedCrackAttempts = 0,
                     vaultAutoLockRemainingSeconds = VAULT_AUTO_LOCK_SECONDS
@@ -3264,22 +3617,50 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             return
         }
 
-        // Crack attempt detected! Automatically rotate encryption password & apply exponential lockout backoff
-        val rotated = CryptoSecurityManager.recordCrackAttemptAndAutoRotate(appContext, threshold = 3)
-        val attempts = CryptoSecurityManager.getFailedCrackAttempts(appContext)
-        val rotations = CryptoSecurityManager.getAutoRotationCount(appContext)
-        val backoffSec = ((CryptoSecurityManager.getLockoutRemainingMs(appContext) + 999L) / 1000L)
-        val backoffSuffix = if (backoffSec > 0L) " • Locked for ${backoffSec}s" else ""
-        val errorMsg = if (rotated) {
-            "Crack attempt blocked! Dynamic encryption password auto-rotated & all vault/app data re-encrypted (Rotation #$rotations)$backoffSuffix."
+        val decoyMatched = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            settingsRepository.verifyDecoyVaultPin(trimmed)
+        }
+        if (decoyMatched) {
+            val entries = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                CryptoSecurityManager.resetCrackAttempts(appContext)
+                vaultManager.getVaultEntries(isDecoySession = true)
+            }
+            _uiState.update {
+                it.copy(
+                    vaultAuthState = VaultAuthState.UNLOCKED_DECOY,
+                    vaultEntries = entries,
+                    vaultErrorMessage = null,
+                    failedCrackAttempts = 0,
+                    vaultAutoLockRemainingSeconds = VAULT_AUTO_LOCK_SECONDS
+                )
+            }
+            startOrResetVaultAutoLockTimer()
+            return
+        }
+
+        // Crack attempt detected! Automatically rotate encryption password & apply exponential lockout backoff on IO
+        val (rotated, attempts, rotations, backoffSec) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            val didRotate = CryptoSecurityManager.recordCrackAttemptAndAutoRotate(appContext, threshold = 3)
+            val att = CryptoSecurityManager.getFailedCrackAttempts(appContext)
+            val rot = CryptoSecurityManager.getAutoRotationCount(appContext)
+            val backoff = ((CryptoSecurityManager.getLockoutRemainingMs(appContext) + 999L) / 1000L)
+            arrayOf(didRotate, att, rot, backoff)
+        }
+        val didRotate = rotated as Boolean
+        val attemptCount = attempts as Int
+        val rotationCount = rotations as Int
+        val backoffSeconds = backoffSec as Long
+        val backoffSuffix = if (backoffSeconds > 0L) " • Locked for ${backoffSeconds}s" else ""
+        val errorMsg = if (didRotate) {
+            "Crack attempt blocked! Dynamic encryption password auto-rotated & all vault/app data re-encrypted (Rotation #$rotationCount)$backoffSuffix."
         } else {
-            "Invalid PIN ($attempts/3 before automatic key rotation & re-encryption)$backoffSuffix."
+            "Invalid PIN ($attemptCount/3 before automatic key rotation & re-encryption)$backoffSuffix."
         }
         _uiState.update {
             it.copy(
                 vaultErrorMessage = errorMsg,
-                failedCrackAttempts = attempts,
-                autoKeyRotationCount = rotations
+                failedCrackAttempts = attemptCount,
+                autoKeyRotationCount = rotationCount
             )
         }
     }
@@ -3312,15 +3693,32 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             var remaining = VAULT_AUTO_LOCK_SECONDS
             while (remaining > 0) {
                 kotlinx.coroutines.delay(1_000L)
-                remaining--
-                val currentAuth = _uiState.value.vaultAuthState
+                val snapshot = _uiState.value
+                val currentAuth = snapshot.vaultAuthState
                 if (currentAuth != VaultAuthState.UNLOCKED_REAL && currentAuth != VaultAuthState.UNLOCKED_DECOY) {
                     return@launch
                 }
+                // Pause the inactivity auto-lock countdown while a Private Vault video is actively playing in the foreground
+                val activeScreen = snapshot.currentScreen
+                val isPlayingVaultInForeground =
+                    (activeScreen is Screen.Player && isVaultVideoItem(activeScreen.video)) ||
+                    (snapshot.miniPlayerVideo != null && isVaultVideoItem(snapshot.miniPlayerVideo) && snapshot.isMiniPlayerPlaying)
+                if (isPlayingVaultInForeground) {
+                    remaining = VAULT_AUTO_LOCK_SECONDS
+                    if (snapshot.vaultAutoLockRemainingSeconds != VAULT_AUTO_LOCK_SECONDS) {
+                        _uiState.update { it.copy(vaultAutoLockRemainingSeconds = VAULT_AUTO_LOCK_SECONDS) }
+                    }
+                    continue
+                }
+                remaining--
                 _uiState.update { it.copy(vaultAutoLockRemainingSeconds = remaining) }
             }
-            val finalAuth = _uiState.value.vaultAuthState
-            if (finalAuth == VaultAuthState.UNLOCKED_REAL || finalAuth == VaultAuthState.UNLOCKED_DECOY) {
+            val finalSnapshot = _uiState.value
+            val finalAuth = finalSnapshot.vaultAuthState
+            val stillPlayingVault =
+                (finalSnapshot.currentScreen is Screen.Player && isVaultVideoItem(finalSnapshot.currentScreen.video)) ||
+                (finalSnapshot.miniPlayerVideo != null && isVaultVideoItem(finalSnapshot.miniPlayerVideo) && finalSnapshot.isMiniPlayerPlaying)
+            if (!stillPlayingVault && (finalAuth == VaultAuthState.UNLOCKED_REAL || finalAuth == VaultAuthState.UNLOCKED_DECOY)) {
                 lockVault()
             }
         }
@@ -3329,10 +3727,48 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     fun lockVault() {
         vaultAutoLockJob?.cancel()
         vaultAutoLockJob = null
+
+        val snapshot = _uiState.value
+        val activePlayerIsVault = snapshot.currentScreen is Screen.Player && isVaultVideoItem(snapshot.currentScreen.video)
+        val activeMiniIsVault = snapshot.miniPlayerVideo != null && isVaultVideoItem(snapshot.miniPlayerVideo)
+
+        // Stop any active Vault playback and close Screen.Player / mini-player BEFORE shredding ephemeral cache
+        if (activePlayerIsVault || activeMiniIsVault) {
+            runCatching {
+                activeExoPlayerRef?.get()?.let { player ->
+                    player.stop()
+                    player.clearMediaItems()
+                }
+            }
+            runCatching {
+                com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()?.let { holderPlayer ->
+                    holderPlayer.stop()
+                    holderPlayer.clearMediaItems()
+                }
+            }
+            com.cyos.player.CyosPlayerHolder.setBackgroundAudioActive(false)
+            com.cyos.player.CyosPlaybackService.stopBackgroundService(appContext)
+            navigationBackStack.removeAll { it is Screen.Player && isVaultVideoItem(it.video) }
+        }
+
         vaultManager.wipeEphemeralPlaybackCache()
         val hasPin = settingsRepository.hasVaultPin()
-        _uiState.update {
-            it.copy(
+        _uiState.update { state ->
+            val nextScreen = if (state.currentScreen is Screen.Player && isVaultVideoItem(state.currentScreen.video)) {
+                Screen.Home
+            } else {
+                state.currentScreen
+            }
+            val nextMiniVideo = if (state.miniPlayerVideo != null && isVaultVideoItem(state.miniPlayerVideo)) {
+                null
+            } else {
+                state.miniPlayerVideo
+            }
+            state.copy(
+                currentScreen = nextScreen,
+                miniPlayerVideo = nextMiniVideo,
+                isMiniPlayerPlaying = if (nextMiniVideo == null) false else state.isMiniPlayerPlaying,
+                isPlayerCurrentlyPlaying = if (activePlayerIsVault) false else state.isPlayerCurrentlyPlaying,
                 vaultAuthState = if (hasPin) VaultAuthState.LOCKED else VaultAuthState.UNINITIALIZED_NO_PIN,
                 vaultEntries = emptyList(),
                 vaultErrorMessage = null,
@@ -3443,91 +3879,173 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun triggerImmediateEncryptedKeyRotation() {
-        val newCount = CryptoSecurityManager.rotateDynamicEncryptionKey(appContext, "user_or_security_trigger")
         _uiState.update {
             it.copy(
-                autoKeyRotationCount = newCount,
-                statusBannerMessage = "Dynamic encryption key rotated (#$newCount) • All data & credentials re-encrypted"
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Rotating AES-256 encryption keys…"
             )
+        }
+        viewModelScope.launch {
+            val newCount = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                CryptoSecurityManager.rotateDynamicEncryptionKey(appContext, "user_or_security_trigger")
+            }
+            _uiState.update {
+                it.copy(
+                    autoKeyRotationCount = newCount,
+                    isFileOperationBusy = false,
+                    fileOperationStatusText = null,
+                    statusBannerMessage = "Dynamic encryption key rotated (#$newCount) • All data & credentials re-encrypted"
+                )
+            }
         }
     }
 
     fun playVaultEntry(entry: VaultVideoEntry) {
-        val playable = vaultManager.prepareEphemeralPlaybackItem(entry)
-        if (playable != null) {
-            navigateTo(Screen.Player(video = playable, playlistQueue = listOf(playable)))
-        } else {
-            val errMsg = "Decryption failed: Encrypted vault file kept intact; playback aborted for security"
-            _uiState.update {
-                it.copy(
-                    vaultErrorMessage = errMsg,
-                    statusBannerMessage = errMsg
-                )
+        _uiState.update {
+            it.copy(
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Opening encrypted video…"
+            )
+        }
+        viewModelScope.launch {
+            val playable = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                vaultManager.prepareEphemeralPlaybackItem(entry)
+            }
+            if (playable != null) {
+                _uiState.update {
+                    it.copy(
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null
+                    )
+                }
+                navigateTo(Screen.Player(video = playable, playlistQueue = listOf(playable)))
+            } else {
+                val errMsg = "Decryption failed: Encrypted vault file kept intact; playback aborted for security"
+                _uiState.update {
+                    it.copy(
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        vaultErrorMessage = errMsg,
+                        statusBannerMessage = errMsg
+                    )
+                }
             }
         }
     }
 
     fun restoreVaultEntry(vaultId: String) {
-        val targetEntry = vaultManager.getVaultEntries(false).find { it.vaultId == vaultId }
-            ?: vaultManager.getVaultEntries(true).find { it.vaultId == vaultId }
-        val restoredFile = vaultManager.restoreVideoFromVault(vaultId)
         val isDecoy = _uiState.value.vaultAuthState == VaultAuthState.UNLOCKED_DECOY
-        if (restoredFile != null) {
-            if (targetEntry != null) {
-                val ext = restoredFile.extension.ifBlank { "mp4" }
-                val currentCatalog = videoRepository.getOrCreateManagedCatalog().toMutableList()
-                if (currentCatalog.none { it.path == restoredFile.absolutePath }) {
-                    currentCatalog.add(
-                        0,
-                        VideoItem(
-                            id = restoredFile.absolutePath.hashCode().toLong(),
-                            title = targetEntry.originalTitle,
-                            displayName = "${targetEntry.originalTitle}.$ext",
-                            uri = Uri.fromFile(restoredFile),
-                            path = restoredFile.absolutePath,
-                            sizeBytes = restoredFile.length().coerceAtLeast(targetEntry.sizeBytes),
-                            durationMs = targetEntry.durationMs,
-                            dateModifiedSeconds = System.currentTimeMillis() / 1000L,
-                            width = targetEntry.width,
-                            height = targetEntry.height,
-                            mimeType = VideoRepository.resolveVideoMimeType(ext),
-                            folderId = (restoredFile.parent ?: "/storage/emulated/0/Movies").lowercase().hashCode().toString(),
-                            folderName = restoredFile.parentFile?.name ?: "Movies",
-                            folderPath = restoredFile.parent ?: "/storage/emulated/0/Movies"
+        refreshLibraryJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Restoring encrypted video from Vault…"
+            )
+        }
+        viewModelScope.launch {
+            val (restoredFile, updatedEntries) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                val targetEntry = vaultManager.getVaultEntries(false).find { it.vaultId == vaultId }
+                    ?: vaultManager.getVaultEntries(true).find { it.vaultId == vaultId }
+                val restored = vaultManager.restoreVideoFromVault(vaultId)
+                if (restored != null && targetEntry != null) {
+                    val ext = restored.extension.ifBlank { "mp4" }
+                    val currentCatalog = videoRepository.getOrCreateManagedCatalog().toMutableList()
+                    if (currentCatalog.none { it.path == restored.absolutePath }) {
+                        currentCatalog.add(
+                            0,
+                            VideoItem(
+                                id = restored.absolutePath.hashCode().toLong(),
+                                title = targetEntry.originalTitle,
+                                displayName = "${targetEntry.originalTitle}.$ext",
+                                uri = Uri.fromFile(restored),
+                                path = restored.absolutePath,
+                                sizeBytes = restored.length().coerceAtLeast(targetEntry.sizeBytes),
+                                durationMs = targetEntry.durationMs,
+                                dateModifiedSeconds = System.currentTimeMillis() / 1000L,
+                                width = targetEntry.width,
+                                height = targetEntry.height,
+                                mimeType = VideoRepository.resolveVideoMimeType(ext),
+                                folderId = (restored.parent ?: "/storage/emulated/0/Movies").lowercase().hashCode().toString(),
+                                folderName = restored.parentFile?.name ?: "Movies",
+                                folderPath = restored.parent ?: "/storage/emulated/0/Movies"
+                            )
                         )
-                    )
-                    videoRepository.saveManagedCatalog(currentCatalog)
+                        videoRepository.saveManagedCatalog(currentCatalog)
+                    }
                 }
+                restored to vaultManager.getVaultEntries(isDecoy)
             }
-            _uiState.update {
-                it.copy(
-                    vaultEntries = vaultManager.getVaultEntries(isDecoy),
-                    vaultErrorMessage = null,
-                    statusBannerMessage = "Restored video from Vault"
-                )
-            }
-            refreshLibrary()
-        } else {
-            val failMsg = "Decryption failed: Encrypted vault file kept intact to prevent data loss"
-            _uiState.update {
-                it.copy(
-                    vaultEntries = vaultManager.getVaultEntries(isDecoy),
-                    vaultErrorMessage = failMsg,
-                    statusBannerMessage = failMsg
-                )
+            if (restoredFile != null) {
+                _uiState.update {
+                    it.copy(
+                        vaultEntries = updatedEntries,
+                        vaultErrorMessage = null,
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = "Restored video from Vault"
+                    )
+                }
+                refreshLibrary()
+            } else {
+                val failMsg = "Decryption failed: Encrypted vault file kept intact to prevent data loss"
+                _uiState.update {
+                    it.copy(
+                        vaultEntries = updatedEntries,
+                        vaultErrorMessage = failMsg,
+                        isFileOperationBusy = false,
+                        fileOperationStatusText = null,
+                        statusBannerMessage = failMsg
+                    )
+                }
             }
         }
     }
 
     fun shredVaultEntry(vaultId: String) {
-        vaultManager.deleteVaultEntryPermanently(vaultId)
         val isDecoy = _uiState.value.vaultAuthState == VaultAuthState.UNLOCKED_DECOY
         _uiState.update {
             it.copy(
-                vaultEntries = vaultManager.getVaultEntries(isDecoy),
-                statusBannerMessage = "Vault video permanently shredded with zero trace"
+                isFileOperationBusy = true,
+                fileOperationStatusText = "Shredding encrypted Vault video…"
             )
         }
+        viewModelScope.launch {
+            val updatedEntries = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                vaultManager.deleteVaultEntryPermanently(vaultId)
+                vaultManager.getVaultEntries(isDecoy)
+            }
+            _uiState.update {
+                it.copy(
+                    vaultEntries = updatedEntries,
+                    isFileOperationBusy = false,
+                    fileOperationStatusText = null,
+                    statusBannerMessage = "Vault video permanently shredded with zero trace"
+                )
+            }
+        }
+    }
+
+    suspend fun captureVideoScreenshotAsync(
+        video: VideoItem,
+        positionMs: Long,
+        playerView: androidx.media3.ui.PlayerView? = null
+    ): ScreenshotCaptureResult {
+        val result = VideoScreenshotCapture.captureFromSurfaceOrRetriever(
+            context = appContext,
+            playerView = playerView,
+            video = video,
+            positionMs = positionMs
+        )
+        _uiState.update {
+            it.copy(
+                statusBannerMessage = if (result.success) {
+                    "Screenshot saved to ${result.displayPath}"
+                } else {
+                    result.message.ifBlank { "Unable to capture screenshot" }
+                }
+            )
+        }
+        return result
     }
 
     fun captureVideoScreenshot(video: VideoItem, positionMs: Long): ScreenshotCaptureResult {
@@ -3541,16 +4059,29 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
                 statusBannerMessage = if (result.success) {
                     "Screenshot saved to ${result.displayPath}"
                 } else {
-                    "Unable to capture screenshot"
+                    result.message.ifBlank { "Unable to capture screenshot" }
                 }
             )
         }
         return result
     }
 
+    fun showStatusMessage(message: String) {
+        _uiState.update { it.copy(statusBannerMessage = message) }
+    }
+
     override fun onCleared() {
         stopObservingMediaStoreVideos()
         deferredPostFrameJob?.cancel()
+        vaultAutoLockJob?.cancel()
+        sleepTimerJob?.cancel()
+        progressSaveJob?.cancel()
+        com.cyos.player.CyosPlayerHolder.setBackgroundAudioActive(false)
+        settingsRepository.release()
+        videoRepository.release()
+        vaultManager.release()
+        recycleBinRepository.release()
+        playlistRepository.release()
         vaultManager.wipeEphemeralPlaybackCache()
         super.onCleared()
     }
@@ -3638,12 +4169,19 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     /**
-     * Advances the decoder engine along the 4-stage fallback chain (HW -> HW+ -> SW+ -> SW).
-     * Returns the new fallback mode, or null if all 4 stages have been exhausted.
+     * Advances the decoder engine along the 4-stage fallback chain (HW -> HW+ -> SW+ -> SW)
+     * strictly for the current playback session WITHOUT overwriting the user's persisted
+     * SettingsRepository decoder preference.
      */
     fun fallbackToNextDecoderEngine(): DecoderEngineMode? {
         val next = _uiState.value.decoderEngineMode.nextFallbackMode() ?: return null
-        setDecoderEngineMode(next)
+        _uiState.update {
+            it.copy(
+                decoderEngineMode = next,
+                activeDecoderBadge = next.badge,
+                statusBannerMessage = "Session fallback to ${next.label} (saved setting preserved)"
+            )
+        }
         return next
     }
 
@@ -4251,14 +4789,37 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun getPlayerVolumeForFolder(folderKey: String): Float {
+        val state = _uiState.value
+        val normFolder = folderKey.trim().trimEnd('/')
+        if (normFolder.isNotEmpty()) {
+            lookupFloatSettingCaseInsensitive(state.folderVolumeMap, normFolder)?.let { return it }
+        }
         return settingsRepository.getSavedPlayerVolumeForFolder(folderKey)
     }
 
     fun getPlayerBrightnessForVideo(videoPath: String, folderKey: String = ""): Float {
+        val state = _uiState.value
+        val normVideo = videoPath.trim()
+        val normFolder = folderKey.trim().trimEnd('/')
+        if (normVideo.isNotEmpty()) {
+            lookupFloatSettingCaseInsensitive(state.videoBrightnessMap, normVideo)?.let { return it }
+        }
+        if (normFolder.isNotEmpty()) {
+            lookupFloatSettingCaseInsensitive(state.folderBrightnessMap, normFolder)?.let { return it }
+        }
         return settingsRepository.getSavedPlayerBrightnessForVideo(videoPath, folderKey)
     }
 
     fun getPlayerVolumeForVideo(videoPath: String, folderKey: String = ""): Float {
+        val state = _uiState.value
+        val normVideo = videoPath.trim()
+        val normFolder = folderKey.trim().trimEnd('/')
+        if (normVideo.isNotEmpty()) {
+            lookupFloatSettingCaseInsensitive(state.videoVolumeMap, normVideo)?.let { return it }
+        }
+        if (normFolder.isNotEmpty()) {
+            lookupFloatSettingCaseInsensitive(state.folderVolumeMap, normFolder)?.let { return it }
+        }
         return settingsRepository.getSavedPlayerVolumeForVideo(videoPath, folderKey)
     }
 
@@ -4271,40 +4832,41 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             value,
             _uiState.value.savedPlayerBrightness
         )
-        val autoCheck = com.cyosplay.player.util.PlayerGestureControlHelper.enforceAutoSafeVolumeAndBrightness(
+        val safetyCheck = com.cyosplay.player.util.PlayerGestureControlHelper.enforceAutoSafeVolumeAndBrightness(
             volumeFraction = _uiState.value.savedPlayerVolume,
             brightnessFraction = clamped,
             isMuted = _uiState.value.isAudioMuted
         )
-        val effectiveBri = autoCheck.safeBrightness
-        val effectiveVol = autoCheck.safeVolume
+        val effectiveBri = safetyCheck.safeBrightness
+        val normVideo = videoPath?.trim().orEmpty()
+        val normFolder = folderKey?.trim()?.trimEnd('/').orEmpty()
 
-        if (!videoPath.isNullOrBlank()) {
-            settingsRepository.setSavedPlayerBrightnessForVideo(videoPath, folderKey ?: "", effectiveBri)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerVolumeForVideo(videoPath, folderKey ?: "", effectiveVol)
-            }
-        } else if (!folderKey.isNullOrBlank()) {
-            settingsRepository.setSavedPlayerBrightnessForFolder(folderKey, effectiveBri)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerVolumeForFolder(folderKey, effectiveVol)
-            }
-        } else {
-            settingsRepository.setSavedPlayerBrightness(effectiveBri)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerVolume(effectiveVol)
-            }
-        }
         _uiState.update { state ->
+            val nextVideoMap = if (normVideo.isNotEmpty()) {
+                state.videoBrightnessMap + (normVideo to effectiveBri)
+            } else {
+                state.videoBrightnessMap
+            }
+            val nextFolderMap = if (normFolder.isNotEmpty()) {
+                state.folderBrightnessMap + (normFolder to effectiveBri)
+            } else {
+                state.folderBrightnessMap
+            }
             state.copy(
                 savedPlayerBrightness = effectiveBri,
-                savedPlayerVolume = if (autoCheck.triggeredWarningAndAuto50) effectiveVol else state.savedPlayerVolume,
-                folderBrightnessMap = settingsRepository.getFolderBrightnessMap(),
-                videoBrightnessMap = settingsRepository.getVideoBrightnessMap(),
-                folderVolumeMap = if (autoCheck.triggeredWarningAndAuto50) settingsRepository.getFolderVolumeMap() else state.folderVolumeMap,
-                videoVolumeMap = if (autoCheck.triggeredWarningAndAuto50) settingsRepository.getVideoVolumeMap() else state.videoVolumeMap,
-                showHighVolumeBrightnessWarning = autoCheck.triggeredWarningAndAuto50 || state.showHighVolumeBrightnessWarning
+                folderBrightnessMap = nextFolderMap,
+                videoBrightnessMap = nextVideoMap,
+                showHighVolumeBrightnessWarning = safetyCheck.triggeredWarningAndAuto50 || state.showHighVolumeBrightnessWarning
             )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (normVideo.isNotEmpty()) {
+                settingsRepository.setSavedPlayerBrightnessForVideo(normVideo, normFolder, effectiveBri)
+            } else if (normFolder.isNotEmpty()) {
+                settingsRepository.setSavedPlayerBrightnessForFolder(normFolder, effectiveBri)
+            } else {
+                settingsRepository.setSavedPlayerBrightness(effectiveBri)
+            }
         }
     }
 
@@ -4317,40 +4879,41 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             value,
             _uiState.value.savedPlayerVolume
         )
-        val autoCheck = com.cyosplay.player.util.PlayerGestureControlHelper.enforceAutoSafeVolumeAndBrightness(
+        val safetyCheck = com.cyosplay.player.util.PlayerGestureControlHelper.enforceAutoSafeVolumeAndBrightness(
             volumeFraction = clamped,
             brightnessFraction = _uiState.value.savedPlayerBrightness,
             isMuted = _uiState.value.isAudioMuted
         )
-        val effectiveVol = autoCheck.safeVolume
-        val effectiveBri = autoCheck.safeBrightness
+        val effectiveVol = safetyCheck.safeVolume
+        val normVideo = videoPath?.trim().orEmpty()
+        val normFolder = folderKey?.trim()?.trimEnd('/').orEmpty()
 
-        if (!videoPath.isNullOrBlank()) {
-            settingsRepository.setSavedPlayerVolumeForVideo(videoPath, folderKey ?: "", effectiveVol)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerBrightnessForVideo(videoPath, folderKey ?: "", effectiveBri)
-            }
-        } else if (!folderKey.isNullOrBlank()) {
-            settingsRepository.setSavedPlayerVolumeForFolder(folderKey, effectiveVol)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerBrightnessForFolder(folderKey, effectiveBri)
-            }
-        } else {
-            settingsRepository.setSavedPlayerVolume(effectiveVol)
-            if (autoCheck.triggeredWarningAndAuto50) {
-                settingsRepository.setSavedPlayerBrightness(effectiveBri)
-            }
-        }
         _uiState.update { state ->
+            val nextVideoMap = if (normVideo.isNotEmpty()) {
+                state.videoVolumeMap + (normVideo to effectiveVol)
+            } else {
+                state.videoVolumeMap
+            }
+            val nextFolderMap = if (normFolder.isNotEmpty()) {
+                state.folderVolumeMap + (normFolder to effectiveVol)
+            } else {
+                state.folderVolumeMap
+            }
             state.copy(
                 savedPlayerVolume = effectiveVol,
-                savedPlayerBrightness = if (autoCheck.triggeredWarningAndAuto50) effectiveBri else state.savedPlayerBrightness,
-                folderVolumeMap = settingsRepository.getFolderVolumeMap(),
-                videoVolumeMap = settingsRepository.getVideoVolumeMap(),
-                folderBrightnessMap = if (autoCheck.triggeredWarningAndAuto50) settingsRepository.getFolderBrightnessMap() else state.folderBrightnessMap,
-                videoBrightnessMap = if (autoCheck.triggeredWarningAndAuto50) settingsRepository.getVideoBrightnessMap() else state.videoBrightnessMap,
-                showHighVolumeBrightnessWarning = autoCheck.triggeredWarningAndAuto50 || state.showHighVolumeBrightnessWarning
+                folderVolumeMap = nextFolderMap,
+                videoVolumeMap = nextVideoMap,
+                showHighVolumeBrightnessWarning = safetyCheck.triggeredWarningAndAuto50 || state.showHighVolumeBrightnessWarning
             )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            if (normVideo.isNotEmpty()) {
+                settingsRepository.setSavedPlayerVolumeForVideo(normVideo, normFolder, effectiveVol)
+            } else if (normFolder.isNotEmpty()) {
+                settingsRepository.setSavedPlayerVolumeForFolder(normFolder, effectiveVol)
+            } else {
+                settingsRepository.setSavedPlayerVolume(effectiveVol)
+            }
         }
     }
 
@@ -4594,12 +5157,79 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun toggleBackgroundAudio() {
-        _uiState.update { it.copy(backgroundAudioEnabled = !it.backgroundAudioEnabled) }
+        val nextEnabled = !_uiState.value.backgroundAudioEnabled
+        com.cyos.player.CyosPlayerHolder.setBackgroundAudioActive(nextEnabled)
+        com.cyos.player.CyosFastPlayer.setWakeModeForBackgroundAudio(
+            com.cyos.player.CyosPlayerHolder.currentPlayerOrNull(),
+            nextEnabled
+        )
+        if (!nextEnabled) {
+            com.cyos.player.CyosPlaybackService.stopBackgroundService(appContext)
+        }
+        _uiState.update {
+            it.copy(
+                backgroundAudioEnabled = nextEnabled,
+                statusBannerMessage = if (nextEnabled) {
+                    "Background Audio enabled"
+                } else {
+                    "Background Audio disabled"
+                }
+            )
+        }
     }
 
     fun setSleepTimerOption(option: SleepTimerOption) {
-        _uiState.update { it.copy(sleepTimerOption = option) }
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _uiState.update {
+            it.copy(
+                sleepTimerOption = option,
+                statusBannerMessage = when (option) {
+                    SleepTimerOption.OFF -> "Sleep timer off"
+                    SleepTimerOption.END_OF_VIDEO -> "Sleep timer: Pause at end of video"
+                    else -> "Sleep timer set for ${option.label}"
+                }
+            )
+        }
+        if (option.minutes > 0) {
+            val durationMs = option.minutes.toLong() * 60_000L
+            sleepTimerJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(durationMs)
+                triggerSleepTimerPause()
+            }
+        }
+    }
+
+    fun onSleepTimerEndOfVideoTriggered() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _uiState.update {
+            it.copy(
+                sleepTimerOption = SleepTimerOption.OFF,
+                isPlayerCurrentlyPlaying = false,
+                isMiniPlayerPlaying = false,
+                statusBannerMessage = "Sleep timer paused playback at end of video"
+            )
+        }
+    }
+
+    private fun triggerSleepTimerPause() {
+        runCatching {
+            activeExoPlayerRef?.get()?.let { player ->
+                player.playWhenReady = false
+                player.pause()
+            }
+        }
+        _uiState.update {
+            it.copy(
+                sleepTimerOption = SleepTimerOption.OFF,
+                isPlayerCurrentlyPlaying = false,
+                isMiniPlayerPlaying = false,
+                statusBannerMessage = "Sleep timer finished — playback paused"
+            )
+        }
     }
 
     fun toggleControlsLocked() {
@@ -4625,34 +5255,90 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         _uiState.update { it.copy(abRepeatStartMs = null, abRepeatEndMs = null) }
     }
 
+    private var progressSaveJob: kotlinx.coroutines.Job? = null
+
     fun savePlaybackProgress(videoPath: String, positionMs: Long, durationMs: Long) {
+        val isStealth = _uiState.value.stealthPlaybackEnabled
+        val matchedVideo = _uiState.value.allVideos.firstOrNull { it.path == videoPath }
+        val folderId = matchedVideo?.folderId ?: ""
+        val folderPath = matchedVideo?.folderPath ?: videoPath.substringBeforeLast('/', "")
+        val nowMs = System.currentTimeMillis()
+        val entry = PlaybackProgress(
+            videoPath = videoPath,
+            lastPositionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs.coerceAtLeast(0L),
+            updatedAtMs = nowMs
+        )
+        if (!isStealth) {
+            _uiState.update { state ->
+                val updatedProgressMap = state.playbackProgressMap.toMutableMap().apply {
+                    put(videoPath, entry)
+                }
+                val updatedFolderMap = state.folderLastPlayedMap.toMutableMap().apply {
+                    if (folderId.isNotBlank()) put(folderId.trim().trimEnd('/').lowercase(), videoPath)
+                    if (folderPath.isNotBlank()) put(folderPath.trim().trimEnd('/').lowercase(), videoPath)
+                }
+                state.copy(
+                    playbackProgressMap = updatedProgressMap,
+                    lastPlayedVideoPath = videoPath,
+                    folderLastPlayedMap = updatedFolderMap
+                )
+            }
+        }
+        progressSaveJob?.cancel()
+        progressSaveJob = viewModelScope.launch(Dispatchers.IO) {
+            settingsRepository.savePlaybackProgress(videoPath, positionMs, durationMs)
+            if (!isStealth) {
+                if (folderId.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(folderId, videoPath)
+                }
+                if (folderPath.isNotBlank()) {
+                    settingsRepository.saveLastPlayedVideoForFolder(folderPath, videoPath)
+                }
+            }
+        }
+    }
+
+    /**
+     * Persists the exact playback position to the cached SettingsRepository (via non-blocking apply())
+     * and immediately exits the player back to the browser so resume state is guaranteed consistent.
+     */
+    fun savePlaybackProgressAndExit(videoPath: String, positionMs: Long, durationMs: Long) {
+        progressSaveJob?.cancel()
+        val isStealth = _uiState.value.stealthPlaybackEnabled
+        val matchedVideo = _uiState.value.allVideos.firstOrNull { it.path == videoPath }
+        val folderId = matchedVideo?.folderId ?: ""
+        val folderPath = matchedVideo?.folderPath ?: videoPath.substringBeforeLast('/', "")
+        val nowMs = System.currentTimeMillis()
+        val entry = PlaybackProgress(
+            videoPath = videoPath,
+            lastPositionMs = positionMs.coerceAtLeast(0L),
+            durationMs = durationMs.coerceAtLeast(0L),
+            updatedAtMs = nowMs
+        )
         settingsRepository.savePlaybackProgress(videoPath, positionMs, durationMs)
-        if (!_uiState.value.stealthPlaybackEnabled) {
-            val matchedVideo = _uiState.value.allVideos.firstOrNull { it.path == videoPath }
-            val folderId = matchedVideo?.folderId ?: ""
-            val folderPath = matchedVideo?.folderPath ?: videoPath.substringBeforeLast('/', "")
+        if (!isStealth) {
             if (folderId.isNotBlank()) {
                 settingsRepository.saveLastPlayedVideoForFolder(folderId, videoPath)
             }
             if (folderPath.isNotBlank()) {
                 settingsRepository.saveLastPlayedVideoForFolder(folderPath, videoPath)
             }
-            val updatedMap = settingsRepository.getAllPlaybackProgress()
-            _uiState.update {
-                it.copy(
-                    playbackProgressMap = updatedMap,
+            _uiState.update { state ->
+                val updatedProgressMap = state.playbackProgressMap.toMutableMap().apply {
+                    put(videoPath, entry)
+                }
+                val updatedFolderMap = state.folderLastPlayedMap.toMutableMap().apply {
+                    if (folderId.isNotBlank()) put(folderId.trim().trimEnd('/').lowercase(), videoPath)
+                    if (folderPath.isNotBlank()) put(folderPath.trim().trimEnd('/').lowercase(), videoPath)
+                }
+                state.copy(
+                    playbackProgressMap = updatedProgressMap,
                     lastPlayedVideoPath = videoPath,
-                    folderLastPlayedMap = settingsRepository.getAllFolderLastPlayedVideos()
+                    folderLastPlayedMap = updatedFolderMap
                 )
             }
         }
-    }
-
-    /**
-     * Synchronously saves the exact playback position and immediately exits the player back to the browser.
-     */
-    fun savePlaybackProgressAndExit(videoPath: String, positionMs: Long, durationMs: Long) {
-        savePlaybackProgress(videoPath, positionMs, durationMs)
         navigateBack()
     }
 
@@ -4785,20 +5471,93 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun setSubtitleEncodingOverride(encoding: String) {
+        val clean = encoding.trim().ifBlank { "AUTO" }
+        _uiState.update { it.copy(subtitleEncodingOverride = clean) }
+        val existingTracks = _uiState.value.externalSubtitleTracks
+        if (existingTracks.none { it.uriString.isNotBlank() }) {
+            _uiState.update {
+                it.copy(statusBannerMessage = "Subtitle encoding set to $clean")
+            }
+            return
+        }
+        viewModelScope.launch {
+            val reparsedTracks = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                existingTracks.map { track ->
+                    if (track.uriString.isBlank()) {
+                        track
+                    } else {
+                        val parsed = runCatching {
+                            val parsedUri = Uri.parse(track.uriString)
+                            appContext.contentResolver.openInputStream(parsedUri)?.use { stream ->
+                                SubtitleParser.parseSubtitleStream(stream, preferredEncoding = clean)
+                            }
+                        }.getOrNull()
+                        if (parsed != null && parsed.isNotEmpty()) track.copy(cues = parsed) else track
+                    }
+                }
+            }
+            _uiState.update { state ->
+                val primaryCues = reparsedTracks.getOrNull(state.activeExternalSubtitleTrackIndex)?.cues
+                    ?: state.externalSubtitleCues
+                val secondaryCues = if (state.secondarySubtitleTrackIndex >= 0) {
+                    reparsedTracks.getOrNull(state.secondarySubtitleTrackIndex)?.cues
+                        ?: state.secondaryExternalSubtitleCues
+                } else {
+                    state.secondaryExternalSubtitleCues
+                }
+                applyAutoSubtitleSyncState(
+                    state.copy(
+                        externalSubtitleTracks = reparsedTracks,
+                        externalSubtitleCues = primaryCues,
+                        secondaryExternalSubtitleCues = secondaryCues,
+                        statusBannerMessage = "Subtitle encoding switched to $clean"
+                    )
+                )
+            }
+        }
+    }
+
     fun loadExternalSubtitleUri(uri: Uri, asSecondary: Boolean = false) {
+        val encoding = _uiState.value.subtitleEncodingOverride
         viewModelScope.launch {
             try {
-                appContext.contentResolver.openInputStream(uri)?.use { stream ->
-                    val cues = SubtitleParser.parseSubtitleStream(stream)
-                    val trackLabel = uri.lastPathSegment?.substringAfterLast('/')?.ifBlank { "External Subtitle" }
-                        ?: "External Subtitle ${_uiState.value.externalSubtitleTracks.size + 1}"
-                    addExternalSubtitleTrack(
-                        label = trackLabel,
-                        uriString = uri.toString(),
-                        cues = cues,
-                        asSecondary = asSecondary
-                    )
+                val (cues, resolvedDisplayName) = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    val parsedCues = appContext.contentResolver.openInputStream(uri)?.use { stream ->
+                        SubtitleParser.parseSubtitleStream(stream, preferredEncoding = encoding)
+                    } ?: emptyList()
+                    val queriedName = runCatching {
+                        appContext.contentResolver.query(
+                            uri,
+                            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                            null,
+                            null,
+                            null
+                        )?.use { cursor ->
+                            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                            if (idx >= 0 && cursor.moveToFirst()) {
+                                cursor.getString(idx)?.trim()?.takeIf { it.isNotBlank() }
+                            } else {
+                                null
+                            }
+                        }
+                    }.getOrNull()
+                    parsedCues to queriedName
                 }
+                val fallbackName = uri.lastPathSegment
+                    ?.substringAfterLast('/')
+                    ?.substringAfterLast(':')
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() && !it.all { ch -> ch.isDigit() } }
+                val trackLabel = resolvedDisplayName
+                    ?: fallbackName
+                    ?: "External Subtitle ${_uiState.value.externalSubtitleTracks.size + 1}"
+                addExternalSubtitleTrack(
+                    label = trackLabel,
+                    uriString = uri.toString(),
+                    cues = cues,
+                    asSecondary = asSecondary
+                )
             } catch (_: Exception) {
                 _uiState.update { it.copy(statusBannerMessage = "Could not parse subtitle file") }
             }
@@ -5156,8 +5915,9 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
      * Resets the saved playback position for a video back to 00:00 ("Start Over").
      */
     fun resetPlaybackProgressAndStartOver(videoPath: String) {
+        progressSaveJob?.cancel()
         settingsRepository.clearPlaybackProgressForVideo(videoPath)
-        val updatedMap = settingsRepository.getAllPlaybackProgress()
+        val updatedMap = settingsRepository.getAllPlaybackProgress() - videoPath
         _uiState.update {
             it.copy(
                 playbackProgressMap = updatedMap,
@@ -5242,6 +6002,7 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     fun setInPipMode(inPip: Boolean) {
+        com.cyos.player.CyosPlayerHolder.setPipActive(inPip)
         _uiState.update {
             it.copy(isInPipMode = inPip)
         }
@@ -5339,6 +6100,32 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
         if (_uiState.value.autoLockVaultOnBackground && _uiState.value.vaultAuthState != VaultAuthState.UNINITIALIZED_NO_PIN) {
             lockVault()
         }
+        val state = _uiState.value
+        val activeVideo = (state.currentScreen as? Screen.Player)?.video ?: state.miniPlayerVideo
+        val isPrivateOrStealth = state.stealthPlaybackEnabled || isVaultVideoItem(activeVideo)
+        val activePlayer = activeExoPlayerRef?.get() ?: com.cyos.player.CyosPlayerHolder.currentPlayerOrNull()
+        val isPlaybackRunning = runCatching { activePlayer?.isPlaying == true || activePlayer?.playWhenReady == true }
+            .getOrDefault(false)
+
+        if (state.backgroundAudioEnabled && !state.isInPipMode && !isPrivateOrStealth && isPlaybackRunning) {
+            com.cyos.player.CyosPlayerHolder.setBackgroundAudioActive(true)
+            com.cyos.player.CyosPlaybackService.startForBackgroundAudio(appContext)
+        } else if (!state.backgroundAudioEnabled && !state.isInPipMode) {
+            com.cyos.player.CyosPlaybackService.stopBackgroundService(appContext)
+            runCatching {
+                activePlayer?.let { player ->
+                    if (player.isPlaying) {
+                        player.playWhenReady = false
+                        player.pause()
+                    }
+                }
+            }
+            if (state.isMiniPlayerPlaying) {
+                _uiState.update { it.copy(isMiniPlayerPlaying = false) }
+            }
+        } else if (isPrivateOrStealth) {
+            com.cyos.player.CyosPlaybackService.stopBackgroundService(appContext)
+        }
     }
 
     fun matchesAdvancedVideoFilters(video: VideoItem): Boolean {
@@ -5348,9 +6135,10 @@ class VideoPlayerViewModel(application: Application) : AndroidViewModel(applicat
             AdvancedCodecFilter.MATROSKA_WEBM -> {
                 video.formatBadge.contains("MKV", ignoreCase = true) ||
                     video.formatBadge.contains("WEBM", ignoreCase = true) ||
+                    video.formatBadge.contains("MK3D", ignoreCase = true) ||
+                    video.formatBadge.contains("MKS", ignoreCase = true) ||
                     video.formatBadge.contains("X26", ignoreCase = true) ||
-                    video.matroskaEbmlBadge.contains("libebml", ignoreCase = true) ||
-                    video.matroskaEbmlBadge.contains("Lavf", ignoreCase = true)
+                    video.matroskaEbmlBadge.contains("Matroska", ignoreCase = true)
             }
             AdvancedCodecFilter.H264_AVC -> {
                 video.videoCodecHint.contains("H.264", ignoreCase = true) ||

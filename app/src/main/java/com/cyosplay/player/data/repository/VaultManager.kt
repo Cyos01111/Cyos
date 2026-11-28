@@ -12,50 +12,172 @@ import java.io.FileOutputStream
 import java.util.UUID
 import javax.crypto.SecretKey
 
+import android.content.IntentSender
+import android.os.Build
+import com.cyosplay.player.util.MediaStoreFileHelper
+
 class VaultManager(private val context: Context) {
+
+    data class VaultMoveResult(
+        val entry: VaultVideoEntry?,
+        val pendingSourceDeleteIntentSender: IntentSender? = null,
+        val pendingSourceDeleteUri: Uri? = null,
+        val pendingSourceDeletePath: String? = null
+    )
 
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("cyosplay_vault_store_v2", Context.MODE_PRIVATE)
     private val vaultDir: File = File(appContext.filesDir, "private_encrypted_vault").apply { mkdirs() }
     private val tempPlaybackDir: File = File(appContext.cacheDir, "vault_ephemeral_play").apply { mkdirs() }
 
-    private val rotationListener = CryptoSecurityManager.KeyRotationListener { oldKey, newKey ->
-        reEncryptAllVaultEntries(oldKey, newKey)
+    private var stagedRotationPairs: List<Pair<File, File>> = emptyList()
+    private var stagedHeaderRewraps: List<Pair<File, ByteArray>> = emptyList()
+    private var stagedCatalogJson: String? = null
+
+    private val rotationListener = object : CryptoSecurityManager.TwoPhaseKeyRotationListener {
+        override fun prepareMasterKeyRotation(oldKey: SecretKey, newKey: SecretKey): Boolean {
+            return prepareReEncryptAllVaultEntries(oldKey, newKey)
+        }
+
+        override fun commitMasterKeyRotation(newKey: SecretKey) {
+            commitReEncryptAllVaultEntries(newKey)
+        }
+
+        override fun rollbackMasterKeyRotation(oldKey: SecretKey) {
+            rollbackReEncryptAllVaultEntries()
+        }
     }
 
     init {
-        // Clean up any leftover ephemeral decrypted files or interrupted .tmp staging files on startup
+        // Clean up any leftover ephemeral decrypted files or interrupted staging files on startup
         wipeEphemeralPlaybackCache()
         cleanupInterruptedStagingFiles()
         CryptoSecurityManager.registerRotationListener(rotationListener)
     }
 
+    fun release() {
+        CryptoSecurityManager.unregisterRotationListener(rotationListener)
+    }
+
     @Synchronized
     private fun cleanupInterruptedStagingFiles() {
         vaultDir.listFiles()?.forEach { file ->
-            if (file.name.endsWith(".tmp")) {
+            val name = file.name
+            if (name.endsWith(ROTATION_STAGE_SUFFIX)) {
+                val targetName = name.removeSuffix(ROTATION_STAGE_SUFFIX)
+                val targetFile = File(vaultDir, targetName)
+                val stageValidUnderCurrentKey = runCatching {
+                    CryptoSecurityManager.verifyEncryptedFileIntegrity(appContext, file)
+                }.getOrDefault(false)
+                if (stageValidUnderCurrentKey) {
+                    if (targetFile.exists()) targetFile.delete()
+                    if (!file.renameTo(targetFile)) {
+                        runCatching {
+                            file.copyTo(targetFile, overwrite = true)
+                            CryptoSecurityManager.shredFileZeroTrace(file)
+                        }
+                    }
+                } else {
+                    CryptoSecurityManager.shredFileZeroTrace(file)
+                }
+            } else if (
+                name.endsWith(".tmp") ||
+                name.contains(".tmp_") ||
+                name.contains(".dec_tmp_") ||
+                name.contains(".rot_plain_") ||
+                name.contains(".rot_enc_")
+            ) {
                 CryptoSecurityManager.shredFileZeroTrace(file)
             }
         }
     }
 
     @Synchronized
-    private fun reEncryptAllVaultEntries(oldKey: SecretKey, newKey: SecretKey) {
-        val raw = prefs.getString(KEY_VAULT_ENTRIES_ENC, null) ?: return
-        val decryptedJson = CryptoSecurityManager.decryptStringWithKey(raw, oldKey) ?: return
+    private fun prepareReEncryptAllVaultEntries(oldKey: SecretKey, newKey: SecretKey): Boolean {
+        val raw = prefs.getString(KEY_VAULT_ENTRIES_ENC, null) ?: return true
+        val decryptedJson = CryptoSecurityManager.decryptStringWithKey(raw, oldKey) ?: return false
         val entries = parseEntriesJson(decryptedJson)
+        val stagedPairs = mutableListOf<Pair<File, File>>()
+        val stagedRewraps = mutableListOf<Pair<File, ByteArray>>()
+
         for (entry in entries) {
             val encFile = File(entry.encryptedFilePath)
             if (encFile.exists() && encFile.isFile) {
-                try {
-                    CryptoSecurityManager.reEncryptFileOnDisk(encFile, oldKey, newKey)
-                } catch (_: Exception) {
-                    // Keep existing file intact if interrupted
+                if (CryptoSecurityManager.isStreamV4File(encFile)) {
+                    // O(1) instant zero-plaintext envelope re-wrap in RAM; zero disk writes until commit
+                    val preparedHeader = CryptoSecurityManager.prepareStreamV4HeaderRewrap(encFile, oldKey, newKey)
+                    if (preparedHeader == null) {
+                        stagedRewraps.forEach { (_, buf) -> buf.fill(0) }
+                        stagedPairs.forEach { (_, s) -> CryptoSecurityManager.shredFileZeroTrace(s) }
+                        return false
+                    }
+                    stagedRewraps.add(encFile to preparedHeader)
+                } else {
+                    // Legacy V3/V2 file: stream-upgrade to V4 envelope format safely
+                    val stageFile = File(encFile.parentFile ?: vaultDir, "${encFile.name}$ROTATION_STAGE_SUFFIX")
+                    val tempPlain = File(encFile.parentFile ?: vaultDir, "${encFile.name}.rot_plain_${System.nanoTime()}")
+                    val ok = try {
+                        val decOk = CryptoSecurityManager.decryptFileFromDiskWithKey(encFile, tempPlain, oldKey)
+                        val encOk = decOk && CryptoSecurityManager.encryptFileToStreamV4WithKek(tempPlain, stageFile, newKey)
+                        CryptoSecurityManager.shredFileZeroTrace(tempPlain)
+                        encOk
+                    } catch (_: Exception) {
+                        CryptoSecurityManager.shredFileZeroTrace(tempPlain)
+                        false
+                    }
+                    if (!ok) {
+                        CryptoSecurityManager.shredFileZeroTrace(stageFile)
+                        stagedRewraps.forEach { (_, buf) -> buf.fill(0) }
+                        stagedPairs.forEach { (_, s) -> CryptoSecurityManager.shredFileZeroTrace(s) }
+                        return false
+                    }
+                    stagedPairs.add(encFile to stageFile)
                 }
             }
         }
-        val newCipher = CryptoSecurityManager.encryptStringWithKey(decryptedJson, newKey)
-        prefs.edit().putString(KEY_VAULT_ENTRIES_ENC, newCipher).commit()
+        stagedRotationPairs = stagedPairs
+        stagedHeaderRewraps = stagedRewraps
+        stagedCatalogJson = decryptedJson
+        return true
+    }
+
+    @Synchronized
+    private fun commitReEncryptAllVaultEntries(newKey: SecretKey) {
+        for ((targetFile, headerPayload) in stagedHeaderRewraps) {
+            runCatching {
+                CryptoSecurityManager.commitStreamV4HeaderRewrap(targetFile, headerPayload)
+            }
+            headerPayload.fill(0)
+        }
+        for ((targetFile, stageFile) in stagedRotationPairs) {
+            if (stageFile.exists()) {
+                if (targetFile.exists()) targetFile.delete()
+                if (!stageFile.renameTo(targetFile)) {
+                    runCatching {
+                        stageFile.copyTo(targetFile, overwrite = true)
+                        CryptoSecurityManager.shredFileZeroTrace(stageFile)
+                    }
+                }
+            }
+        }
+        stagedCatalogJson?.let { json ->
+            val newCipher = CryptoSecurityManager.encryptStringWithKey(json, newKey)
+            prefs.edit().putString(KEY_VAULT_ENTRIES_ENC, newCipher).commit()
+        }
+        stagedHeaderRewraps = emptyList()
+        stagedRotationPairs = emptyList()
+        stagedCatalogJson = null
+    }
+
+    @Synchronized
+    private fun rollbackReEncryptAllVaultEntries() {
+        stagedHeaderRewraps.forEach { (_, buf) -> buf.fill(0) }
+        stagedRotationPairs.forEach { (_, stageFile) ->
+            if (stageFile.exists()) CryptoSecurityManager.shredFileZeroTrace(stageFile)
+        }
+        stagedHeaderRewraps = emptyList()
+        stagedRotationPairs = emptyList()
+        stagedCatalogJson = null
     }
 
     fun getVaultEntries(isDecoySession: Boolean = false): List<VaultVideoEntry> {
@@ -72,6 +194,16 @@ class VaultManager(private val context: Context) {
      */
     @Synchronized
     fun moveVideoToVault(video: VideoItem, isDecoyEntry: Boolean = false): VaultVideoEntry? {
+        return moveVideoToVaultWithDeleteRequest(video, isDecoyEntry).entry
+    }
+
+    /**
+     * Encrypts and moves a VideoItem into the Private Vault using single-pass verified chunked AEAD streaming.
+     * On Android 10+ (Scoped Storage), if direct shredding cannot delete the unencrypted source original,
+     * returns a MediaStore delete IntentSender so the UI can request system-approved gallery removal.
+     */
+    @Synchronized
+    fun moveVideoToVaultWithDeleteRequest(video: VideoItem, isDecoyEntry: Boolean = false): VaultMoveResult {
         val vaultId = UUID.randomUUID().toString()
         val encryptedFile = File(vaultDir, "$vaultId.cyosvault")
         val sourceFile = File(video.path)
@@ -80,7 +212,6 @@ class VaultManager(private val context: Context) {
         val readableSourceFile: File? = when {
             sourceFile.exists() && sourceFile.isFile && sourceFile.length() > 0L -> sourceFile
             else -> {
-                // Attempt to read from ContentResolver if video is backed by a content:// URI
                 try {
                     val scheme = video.uri.scheme?.lowercase()
                     if (scheme == "content") {
@@ -108,28 +239,71 @@ class VaultManager(private val context: Context) {
 
         if (readableSourceFile == null || !readableSourceFile.exists() || readableSourceFile.length() <= 0L) {
             stagedUriFile?.let { CryptoSecurityManager.shredFileZeroTrace(it) }
-            return null
+            return VaultMoveResult(entry = null)
         }
 
         val actualSizeBytes = readableSourceFile.length().coerceAtLeast(video.sizeBytes)
-        val encryptedOk = CryptoSecurityManager.encryptFileToDisk(appContext, readableSourceFile, encryptedFile)
-        val verifiedOk = encryptedOk &&
+        // encryptFileToDisk already performs a full AEAD integrity verification pass on the staging file
+        val encryptedOk = CryptoSecurityManager.encryptFileToDisk(appContext, readableSourceFile, encryptedFile) &&
             encryptedFile.exists() &&
-            encryptedFile.length() > 0L &&
-            CryptoSecurityManager.verifyEncryptedFileIntegrity(appContext, encryptedFile)
+            encryptedFile.length() > 0L
 
         stagedUriFile?.let { CryptoSecurityManager.shredFileZeroTrace(it) }
 
-        if (!verifiedOk) {
+        if (!encryptedOk) {
             if (encryptedFile.exists()) {
                 CryptoSecurityManager.shredFileZeroTrace(encryptedFile)
             }
-            return null
+            return VaultMoveResult(entry = null)
         }
 
-        // Only shred the original file after the encrypted vault file has been verified intact
-        if (sourceFile.exists() && sourceFile.isFile) {
+        // Delete the unencrypted source original; on Android 10+ Scoped Storage fall back to MediaStore delete request
+        var pendingIntentSender: IntentSender? = null
+        var pendingDeleteUri: Uri? = null
+        val directDeleted = if (sourceFile.exists() && sourceFile.isFile) {
             CryptoSecurityManager.shredFileZeroTrace(sourceFile)
+            !sourceFile.exists()
+        } else {
+            false
+        }
+
+        if (!directDeleted) {
+            val contentUri = if (video.uri.scheme.equals("content", ignoreCase = true)) {
+                video.uri
+            } else {
+                MediaStoreFileHelper.queryExistingMediaStoreUri(appContext.contentResolver, video.path)
+            }
+            if (contentUri != null) {
+                val mediaDeleteOutcome = runCatching {
+                    val deletedRows = appContext.contentResolver.delete(contentUri, null, null)
+                    deletedRows > 0
+                }.getOrElse { err ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        pendingIntentSender = runCatching {
+                            android.provider.MediaStore.createDeleteRequest(
+                                appContext.contentResolver,
+                                listOf(contentUri)
+                            ).intentSender
+                        }.getOrNull()
+                        pendingDeleteUri = contentUri
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                        err is android.app.RecoverableSecurityException
+                    ) {
+                        pendingIntentSender = err.userAction.actionIntent.intentSender
+                        pendingDeleteUri = contentUri
+                    }
+                    false
+                }
+                if (!mediaDeleteOutcome && pendingIntentSender == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    pendingIntentSender = runCatching {
+                        android.provider.MediaStore.createDeleteRequest(
+                            appContext.contentResolver,
+                            listOf(contentUri)
+                        ).intentSender
+                    }.getOrNull()
+                    pendingDeleteUri = contentUri
+                }
+            }
         }
 
         val entry = VaultVideoEntry(
@@ -146,7 +320,12 @@ class VaultManager(private val context: Context) {
         )
         val updated = loadAllVaultEntriesInternal().toMutableList().apply { add(0, entry) }
         saveAllVaultEntriesInternal(updated)
-        return entry
+        return VaultMoveResult(
+            entry = entry,
+            pendingSourceDeleteIntentSender = pendingIntentSender,
+            pendingSourceDeleteUri = pendingDeleteUri,
+            pendingSourceDeletePath = if (pendingIntentSender != null) video.path else null
+        )
     }
 
     /**
@@ -202,8 +381,11 @@ class VaultManager(private val context: Context) {
     }
 
     /**
-     * Decrypts a Vault video into an ephemeral sandboxed playback file that is shredded when playback ends.
-     * Never falls back to the unencrypted originalPath if decryption fails; returns null instead.
+     * Prepares a Private Vault video for playback.
+     * - For V3 chunked AES-256-GCM files: streams directly in RAM via [com.cyos.player.VaultChunkedAesGcmDataSource]
+     *   (`cyosvault://`), providing instant seekable playback with ZERO plaintext ever written to disk.
+     * - For legacy V2 files: falls back to an ephemeral sandboxed playback file that is shredded when playback ends.
+     * Never falls back to the unencrypted originalPath if verification/decryption fails; returns null instead.
      */
     @Synchronized
     fun prepareEphemeralPlaybackItem(entry: VaultVideoEntry): VideoItem? {
@@ -212,6 +394,51 @@ class VaultManager(private val context: Context) {
             return null
         }
         val ext = File(entry.originalPath).extension.ifBlank { "mp4" }
+
+        // Zero-plaintext chunked streaming path for V4 Envelope and legacy V3 AES-256-GCM files
+        if (CryptoSecurityManager.isStreamEncryptedFile(encFile)) {
+            val header = CryptoSecurityManager.readStreamHeader(encFile) ?: return null
+            if (header.totalPlainLength <= 0L) return null
+            val streamUri = com.cyos.player.VaultChunkedAesGcmDataSource.buildVaultUri(
+                encryptedFilePath = encFile.absolutePath,
+                displayFileName = "${entry.originalTitle}.$ext"
+            )
+            // Verify chunk 0 authenticates cleanly in RAM via the streaming DataSource before launching playback
+            val probeOk = runCatching {
+                val ds = com.cyos.player.VaultChunkedAesGcmDataSource(appContext)
+                try {
+                    val spec = androidx.media3.datasource.DataSpec(streamUri)
+                    val totalLen = ds.open(spec)
+                    if (totalLen <= 0L) return@runCatching false
+                    val probe = ByteArray(1)
+                    val read = ds.read(probe, 0, 1)
+                    probe.fill(0)
+                    read == 1
+                } finally {
+                    runCatching { ds.close() }
+                }
+            }.getOrDefault(false)
+            if (!probeOk) return null
+
+            return VideoItem(
+                id = entry.vaultId.hashCode().toLong(),
+                title = entry.originalTitle,
+                displayName = "${entry.originalTitle}.$ext",
+                uri = streamUri,
+                path = encFile.absolutePath,
+                sizeBytes = header.totalPlainLength.coerceAtLeast(entry.sizeBytes),
+                durationMs = entry.durationMs,
+                dateModifiedSeconds = entry.addedTimestampMs / 1000L,
+                width = entry.width,
+                height = entry.height,
+                mimeType = VideoRepository.resolveVideoMimeType(ext),
+                folderId = "private_vault",
+                folderName = "Private Vault",
+                folderPath = vaultDir.absolutePath
+            )
+        }
+
+        // Legacy V2 fallback (decrypt to ephemeral sandboxed cache)
         val tempFile = File(tempPlaybackDir, "play_${entry.vaultId}.$ext")
         val decryptedOk = CryptoSecurityManager.decryptFileFromDisk(appContext, encFile, tempFile)
         if (!decryptedOk || !tempFile.exists() || tempFile.length() <= 0L) {
@@ -330,5 +557,6 @@ class VaultManager(private val context: Context) {
 
     companion object {
         private const val KEY_VAULT_ENTRIES_ENC = "vault_entries_aes_gcm"
+        private const val ROTATION_STAGE_SUFFIX = ".rot_stage"
     }
 }

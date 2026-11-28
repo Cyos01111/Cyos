@@ -38,7 +38,12 @@ class SettingsRepository(private val context: Context) {
 
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences =
-        appContext.getSharedPreferences("cyosplay_secure_settings_v2", Context.MODE_PRIVATE)
+        appContext.getSharedPreferences(SECURE_PREFS_NAME, Context.MODE_PRIVATE)
+    private val fastPrefs: SharedPreferences =
+        appContext.getSharedPreferences(FAST_PREFS_NAME, Context.MODE_PRIVATE)
+
+    private val decryptedCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val missingKeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private val keyRotationListener = CryptoSecurityManager.KeyRotationListener { oldKey, newKey ->
         reEncryptAllStoredSettings(oldKey, newKey)
@@ -48,17 +53,84 @@ class SettingsRepository(private val context: Context) {
         CryptoSecurityManager.registerRotationListener(keyRotationListener)
     }
 
-    private fun putEncrypted(key: String, plainValue: String) {
-        val cipher = CryptoSecurityManager.encryptString(appContext, plainValue)
-        prefs.edit().putString(key, cipher).commit()
+    fun release() {
+        CryptoSecurityManager.unregisterRotationListener(keyRotationListener)
+        decryptedCache.clear()
+        missingKeys.clear()
+    }
+
+    private fun putEncrypted(key: String, plainValue: String, syncCommit: Boolean = false) {
+        decryptedCache[key] = plainValue
+        missingKeys.remove(key)
+        if (isSensitiveEncryptedKey(key)) {
+            val cipher = CryptoSecurityManager.encryptString(appContext, plainValue)
+            val editor = prefs.edit().putString(key, cipher)
+            if (syncCommit) editor.commit() else editor.apply()
+        } else {
+            val fastEditor = fastPrefs.edit().putString(key, plainValue)
+            if (syncCommit) fastEditor.commit() else fastEditor.apply()
+            if (prefs.contains(key)) {
+                prefs.edit().remove(key).apply()
+            }
+        }
+    }
+
+    private fun removeKey(key: String, syncCommit: Boolean = false) {
+        decryptedCache.remove(key)
+        missingKeys.add(key)
+        val editor = prefs.edit().remove(key)
+        val fastEditor = fastPrefs.edit().remove(key)
+        if (syncCommit) {
+            editor.commit()
+            fastEditor.commit()
+        } else {
+            editor.apply()
+            fastEditor.apply()
+        }
     }
 
     private fun getDecrypted(key: String, defaultValue: String = ""): String {
-        val raw = prefs.getString(key, null) ?: return defaultValue
+        decryptedCache[key]?.let { return it }
+        if (missingKeys.contains(key)) return defaultValue
+
+        if (!isSensitiveEncryptedKey(key)) {
+            val fastVal = fastPrefs.getString(key, null)
+            if (fastVal != null) {
+                decryptedCache[key] = fastVal
+                return fastVal
+            }
+            // Transparent 1-time migration from legacy encrypted prefs without blocking new installs
+            val legacyRaw = prefs.getString(key, null)
+            if (legacyRaw == null) {
+                missingKeys.add(key)
+                return defaultValue
+            }
+            val migratedPlain = if (CryptoSecurityManager.isEncryptedString(legacyRaw)) {
+                CryptoSecurityManager.decryptString(appContext, legacyRaw) ?: return defaultValue
+            } else {
+                legacyRaw
+            }
+            decryptedCache[key] = migratedPlain
+            fastPrefs.edit().putString(key, migratedPlain).apply()
+            prefs.edit().remove(key).apply()
+            return migratedPlain
+        }
+
+        val raw = prefs.getString(key, null)
+        if (raw == null) {
+            missingKeys.add(key)
+            return defaultValue
+        }
         return if (CryptoSecurityManager.isEncryptedString(raw)) {
-            CryptoSecurityManager.decryptString(appContext, raw) ?: defaultValue
+            val plain = CryptoSecurityManager.decryptString(appContext, raw)
+            if (plain != null) {
+                decryptedCache[key] = plain
+                plain
+            } else {
+                defaultValue
+            }
         } else {
-            // Migrate legacy plain value to encrypted storage automatically
+            // Migrate legacy plain sensitive value to encrypted storage automatically
             putEncrypted(key, raw)
             raw
         }
@@ -73,6 +145,8 @@ class SettingsRepository(private val context: Context) {
                 val plain = CryptoSecurityManager.decryptStringWithKey(v, oldKey)
                 if (plain != null) {
                     editor.putString(k, CryptoSecurityManager.encryptStringWithKey(plain, newKey))
+                    decryptedCache[k] = plain
+                    missingKeys.remove(k)
                 }
             }
         }
@@ -82,12 +156,14 @@ class SettingsRepository(private val context: Context) {
     // --- Vault PIN & Decoy PIN & Security Question (Encrypted PBKDF2 + AES-256-GCM) ---
 
     fun hasVaultPin(): Boolean {
-        return getDecrypted(KEY_VAULT_PIN_TOKEN).isNotBlank()
+        return !prefs.getString(KEY_VAULT_PIN_TOKEN, null).isNullOrBlank()
     }
 
     fun setVaultPin(pin: String) {
         val token = CryptoSecurityManager.createEncryptedSecretHash(appContext, pin)
-        prefs.edit().putString(KEY_VAULT_PIN_TOKEN, token).commit()
+        decryptedCache.remove(KEY_VAULT_PIN_TOKEN)
+        missingKeys.remove(KEY_VAULT_PIN_TOKEN)
+        prefs.edit().putString(KEY_VAULT_PIN_TOKEN, token).apply()
     }
 
     fun verifyVaultPin(candidatePin: String): Boolean {
@@ -97,11 +173,13 @@ class SettingsRepository(private val context: Context) {
 
     fun setDecoyVaultPin(decoyPin: String) {
         if (decoyPin.isBlank()) {
-            prefs.edit().remove(KEY_DECOY_PIN_TOKEN).commit()
+            removeKey(KEY_DECOY_PIN_TOKEN)
             return
         }
         val token = CryptoSecurityManager.createEncryptedSecretHash(appContext, decoyPin)
-        prefs.edit().putString(KEY_DECOY_PIN_TOKEN, token).commit()
+        decryptedCache.remove(KEY_DECOY_PIN_TOKEN)
+        missingKeys.remove(KEY_DECOY_PIN_TOKEN)
+        prefs.edit().putString(KEY_DECOY_PIN_TOKEN, token).apply()
     }
 
     fun hasDecoyVaultPin(): Boolean {
@@ -119,7 +197,9 @@ class SettingsRepository(private val context: Context) {
             appContext,
             answer.trim().lowercase()
         )
-        prefs.edit().putString(KEY_SECURITY_ANSWER_TOKEN, answerToken).commit()
+        decryptedCache.remove(KEY_SECURITY_ANSWER_TOKEN)
+        missingKeys.remove(KEY_SECURITY_ANSWER_TOKEN)
+        prefs.edit().putString(KEY_SECURITY_ANSWER_TOKEN, answerToken).apply()
     }
 
     fun saveSecondarySecurityQuestion(question: String, answer: String) {
@@ -129,7 +209,9 @@ class SettingsRepository(private val context: Context) {
             appContext,
             answer.trim().lowercase()
         )
-        prefs.edit().putString(KEY_SECURITY_ANSWER_TOKEN_2, answerToken).commit()
+        decryptedCache.remove(KEY_SECURITY_ANSWER_TOKEN_2)
+        missingKeys.remove(KEY_SECURITY_ANSWER_TOKEN_2)
+        prefs.edit().putString(KEY_SECURITY_ANSWER_TOKEN_2, answerToken).apply()
     }
 
     fun getSecurityQuestion(): String {
@@ -259,7 +341,7 @@ class SettingsRepository(private val context: Context) {
 
     fun setLastPlayedVideoPath(videoPath: String?) {
         if (videoPath.isNullOrBlank()) {
-            prefs.edit().remove(KEY_LAST_PLAYED_VIDEO_PATH).commit()
+            removeKey(KEY_LAST_PLAYED_VIDEO_PATH)
         } else if (!isStealthPlaybackEnabled()) {
             putEncrypted(KEY_LAST_PLAYED_VIDEO_PATH, videoPath)
         }
@@ -323,12 +405,27 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun clearAllPlaybackHistoryAndTraces() {
+        listOf(
+            KEY_PLAYBACK_PROGRESS_JSON,
+            KEY_LAST_PLAYED_VIDEO_PATH,
+            KEY_FOLDER_LAST_PLAYED_JSON,
+            KEY_BOOKMARKS_JSON
+        ).forEach { k ->
+            decryptedCache.remove(k)
+            missingKeys.add(k)
+        }
         prefs.edit()
             .remove(KEY_PLAYBACK_PROGRESS_JSON)
             .remove(KEY_LAST_PLAYED_VIDEO_PATH)
             .remove(KEY_FOLDER_LAST_PLAYED_JSON)
             .remove(KEY_BOOKMARKS_JSON)
-            .commit()
+            .apply()
+        fastPrefs.edit()
+            .remove(KEY_PLAYBACK_PROGRESS_JSON)
+            .remove(KEY_LAST_PLAYED_VIDEO_PATH)
+            .remove(KEY_FOLDER_LAST_PLAYED_JSON)
+            .remove(KEY_BOOKMARKS_JSON)
+            .apply()
     }
 
     fun getVideoBookmarks(videoPath: String): List<Long> {
@@ -525,6 +622,12 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun getSavedPlayerBrightnessForFolder(folderKey: String): Float {
+        val normalized = folderKey.trim().trimEnd('/')
+        if (normalized.isNotBlank()) {
+            val map = getFolderBrightnessMap()
+            map[normalized]?.let { return it }
+            map.entries.firstOrNull { it.key.equals(normalized, ignoreCase = true) }?.let { return it.value }
+        }
         return getSavedPlayerBrightness()
     }
 
@@ -532,22 +635,18 @@ class SettingsRepository(private val context: Context) {
         val clamped = com.cyosplay.player.util.PlayerGestureControlHelper.sanitizeBrightness(value)
         setSavedPlayerBrightness(clamped)
         val normalized = folderKey.trim().trimEnd('/')
-        val map = getFolderBrightnessMap().toMutableMap()
-        map.keys.toList().forEach { k -> map[k] = clamped }
-        if (normalized.isNotBlank()) {
-            map[normalized] = clamped
+        if (normalized.isBlank()) {
+            return
         }
+        val map = getFolderBrightnessMap().toMutableMap()
+        val existingKey = map.keys.firstOrNull { it.equals(normalized, ignoreCase = true) }
+        if (existingKey != null && existingKey != normalized) {
+            map.remove(existingKey)
+        }
+        map[normalized] = clamped
         val obj = JSONObject()
         map.forEach { (k, v) -> obj.put(k, v.toDouble()) }
         putEncrypted(KEY_FOLDER_BRIGHTNESS_MAP_JSON, obj.toString())
-
-        val vMap = getVideoBrightnessMap().toMutableMap()
-        if (vMap.isNotEmpty()) {
-            vMap.keys.toList().forEach { k -> vMap[k] = clamped }
-            val vObj = JSONObject()
-            vMap.forEach { (k, v) -> vObj.put(k, v.toDouble()) }
-            putEncrypted(KEY_VIDEO_BRIGHTNESS_MAP_JSON, vObj.toString())
-        }
     }
 
     fun getFolderVolumeMap(): Map<String, Float> {
@@ -569,6 +668,12 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun getSavedPlayerVolumeForFolder(folderKey: String): Float {
+        val normalized = folderKey.trim().trimEnd('/')
+        if (normalized.isNotBlank()) {
+            val map = getFolderVolumeMap()
+            map[normalized]?.let { return it }
+            map.entries.firstOrNull { it.key.equals(normalized, ignoreCase = true) }?.let { return it.value }
+        }
         return getSavedPlayerVolume()
     }
 
@@ -576,22 +681,18 @@ class SettingsRepository(private val context: Context) {
         val clamped = com.cyosplay.player.util.PlayerGestureControlHelper.sanitizeVolume(value)
         setSavedPlayerVolume(clamped)
         val normalized = folderKey.trim().trimEnd('/')
-        val map = getFolderVolumeMap().toMutableMap()
-        map.keys.toList().forEach { k -> map[k] = clamped }
-        if (normalized.isNotBlank()) {
-            map[normalized] = clamped
+        if (normalized.isBlank()) {
+            return
         }
+        val map = getFolderVolumeMap().toMutableMap()
+        val existingKey = map.keys.firstOrNull { it.equals(normalized, ignoreCase = true) }
+        if (existingKey != null && existingKey != normalized) {
+            map.remove(existingKey)
+        }
+        map[normalized] = clamped
         val obj = JSONObject()
         map.forEach { (k, v) -> obj.put(k, v.toDouble()) }
         putEncrypted(KEY_FOLDER_VOLUME_MAP_JSON, obj.toString())
-
-        val vMap = getVideoVolumeMap().toMutableMap()
-        if (vMap.isNotEmpty()) {
-            vMap.keys.toList().forEach { k -> vMap[k] = clamped }
-            val vObj = JSONObject()
-            vMap.forEach { (k, v) -> vObj.put(k, v.toDouble()) }
-            putEncrypted(KEY_VIDEO_VOLUME_MAP_JSON, vObj.toString())
-        }
     }
 
     fun getVideoBrightnessMap(): Map<String, Float> {
@@ -613,21 +714,36 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun getSavedPlayerBrightnessForVideo(videoPath: String, folderKey: String = ""): Float {
+        val normVideo = videoPath.trim()
+        if (normVideo.isNotBlank()) {
+            val vMap = getVideoBrightnessMap()
+            vMap[normVideo]?.let { return it }
+            vMap.entries.firstOrNull { it.key.equals(normVideo, ignoreCase = true) }?.let { return it.value }
+        }
+        val resolvedFolder = folderKey.trim().trimEnd('/').ifBlank {
+            normVideo.substringBeforeLast('/', "").trim().trimEnd('/')
+        }
+        if (resolvedFolder.isNotBlank()) {
+            return getSavedPlayerBrightnessForFolder(resolvedFolder)
+        }
         return getSavedPlayerBrightness()
     }
 
     fun setSavedPlayerBrightnessForVideo(videoPath: String, folderKey: String = "", value: Float) {
         val clamped = com.cyosplay.player.util.PlayerGestureControlHelper.sanitizeBrightness(value)
-        val normFolder = folderKey.trim().trimEnd('/')
-        val parentDir = videoPath.trim().substringBeforeLast('/', "").trim().trimEnd('/')
-        setSavedPlayerBrightnessForFolder(normFolder.ifBlank { parentDir }, clamped)
-        if (normFolder.isNotEmpty() && parentDir.isNotEmpty() && normFolder != parentDir) {
-            setSavedPlayerBrightnessForFolder(parentDir, clamped)
-        }
         val normVideo = videoPath.trim()
+        val normFolder = folderKey.trim().trimEnd('/')
+        val parentDir = normVideo.substringBeforeLast('/', "").trim().trimEnd('/')
+        val resolvedFolder = normFolder.ifBlank { parentDir }
+        if (resolvedFolder.isNotBlank()) {
+            setSavedPlayerBrightnessForFolder(resolvedFolder, clamped)
+        }
         if (normVideo.isBlank()) return
         val map = getVideoBrightnessMap().toMutableMap()
-        map.keys.toList().forEach { k -> map[k] = clamped }
+        val existingKey = map.keys.firstOrNull { it.equals(normVideo, ignoreCase = true) }
+        if (existingKey != null && existingKey != normVideo) {
+            map.remove(existingKey)
+        }
         map[normVideo] = clamped
         val obj = JSONObject()
         map.forEach { (k, v) -> obj.put(k, v.toDouble()) }
@@ -653,21 +769,36 @@ class SettingsRepository(private val context: Context) {
     }
 
     fun getSavedPlayerVolumeForVideo(videoPath: String, folderKey: String = ""): Float {
+        val normVideo = videoPath.trim()
+        if (normVideo.isNotBlank()) {
+            val vMap = getVideoVolumeMap()
+            vMap[normVideo]?.let { return it }
+            vMap.entries.firstOrNull { it.key.equals(normVideo, ignoreCase = true) }?.let { return it.value }
+        }
+        val resolvedFolder = folderKey.trim().trimEnd('/').ifBlank {
+            normVideo.substringBeforeLast('/', "").trim().trimEnd('/')
+        }
+        if (resolvedFolder.isNotBlank()) {
+            return getSavedPlayerVolumeForFolder(resolvedFolder)
+        }
         return getSavedPlayerVolume()
     }
 
     fun setSavedPlayerVolumeForVideo(videoPath: String, folderKey: String = "", value: Float) {
         val clamped = com.cyosplay.player.util.PlayerGestureControlHelper.sanitizeVolume(value)
-        val normFolder = folderKey.trim().trimEnd('/')
-        val parentDir = videoPath.trim().substringBeforeLast('/', "").trim().trimEnd('/')
-        setSavedPlayerVolumeForFolder(normFolder.ifBlank { parentDir }, clamped)
-        if (normFolder.isNotEmpty() && parentDir.isNotEmpty() && normFolder != parentDir) {
-            setSavedPlayerVolumeForFolder(parentDir, clamped)
-        }
         val normVideo = videoPath.trim()
+        val normFolder = folderKey.trim().trimEnd('/')
+        val parentDir = normVideo.substringBeforeLast('/', "").trim().trimEnd('/')
+        val resolvedFolder = normFolder.ifBlank { parentDir }
+        if (resolvedFolder.isNotBlank()) {
+            setSavedPlayerVolumeForFolder(resolvedFolder, clamped)
+        }
         if (normVideo.isBlank()) return
         val map = getVideoVolumeMap().toMutableMap()
-        map.keys.toList().forEach { k -> map[k] = clamped }
+        val existingKey = map.keys.firstOrNull { it.equals(normVideo, ignoreCase = true) }
+        if (existingKey != null && existingKey != normVideo) {
+            map.remove(existingKey)
+        }
         map[normVideo] = clamped
         val obj = JSONObject()
         map.forEach { (k, v) -> obj.put(k, v.toDouble()) }
@@ -1434,6 +1565,9 @@ class SettingsRepository(private val context: Context) {
     }
 
     companion object {
+        const val SECURE_PREFS_NAME = "cyosplay_secure_settings_v2"
+        const val FAST_PREFS_NAME = "cyosplay_ui_playback_prefs_v1"
+
         private const val KEY_VAULT_PIN_TOKEN = "vault_pin_token"
         private const val KEY_DECOY_PIN_TOKEN = "decoy_pin_token"
         private const val KEY_SECURITY_QUESTION = "security_question_enc"
@@ -1511,6 +1645,21 @@ class SettingsRepository(private val context: Context) {
         private const val KEY_NEW_VIDEO_PATHS_JSON = "new_video_paths_json_v106rv8"
         private const val KEY_FOLDER_NEW_VIDEO_COUNTS_JSON = "folder_new_video_counts_json_v106rv8"
         private const val KEY_VIDEO_AUDIO_TRACK_MAP_JSON = "video_audio_track_map_json_v106rv18"
+
+        private val SENSITIVE_ENCRYPTED_KEYS: Set<String> = setOf(
+            KEY_VAULT_PIN_TOKEN,
+            KEY_DECOY_PIN_TOKEN,
+            KEY_SECURITY_QUESTION,
+            KEY_SECURITY_ANSWER_TOKEN,
+            KEY_SECURITY_QUESTION_2,
+            KEY_SECURITY_ANSWER_TOKEN_2,
+            KEY_STEALTH_PLAYBACK,
+            KEY_AUTO_LOCK_VAULT,
+            KEY_BIOMETRIC_VAULT,
+            KEY_HIDDEN_FOLDERS_JSON
+        )
+
+        fun isSensitiveEncryptedKey(key: String): Boolean = key in SENSITIVE_ENCRYPTED_KEYS
 
         val PRESET_RECOVERY_QUESTIONS: List<String> = listOf(
             "What is your favorite cinema movie?",

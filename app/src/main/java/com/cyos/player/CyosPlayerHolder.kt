@@ -43,7 +43,54 @@ object CyosPlayerHolder {
     @Volatile
     private var lastNetworkMode: Boolean = false
 
-    val sharedDownmixAudioProcessor: Eac3DownmixAudioProcessor = Eac3DownmixAudioProcessor()
+    private val attachedClients = java.util.concurrent.atomic.AtomicInteger(0)
+
+    @Volatile
+    private var pipActive: Boolean = false
+
+    @Volatile
+    private var backgroundAudioActive: Boolean = false
+
+    @Volatile
+    private var activeDownmixAudioProcessor: Eac3DownmixAudioProcessor = Eac3DownmixAudioProcessor()
+
+    val sharedDownmixAudioProcessor: Eac3DownmixAudioProcessor
+        get() = activeDownmixAudioProcessor
+
+    fun markPlayerAttached() {
+        attachedClients.incrementAndGet()
+    }
+
+    fun markPlayerDetached() {
+        attachedClients.updateAndGet { current -> (current - 1).coerceAtLeast(0) }
+    }
+
+    fun setPipActive(active: Boolean) {
+        pipActive = active
+    }
+
+    fun setBackgroundAudioActive(active: Boolean) {
+        backgroundAudioActive = active
+    }
+
+    fun isBackgroundAudioActive(): Boolean = backgroundAudioActive
+
+    fun lastCodecProfileKey(): String = lastCodecKey
+
+    fun buildCodecProfileKey(
+        decoderModeName: String,
+        preferSoftwareDecoder: Boolean,
+        forceLowRamMode: Boolean,
+        batterySaverEnabled: Boolean
+    ): String {
+        return "$decoderModeName:$preferSoftwareDecoder:$forceLowRamMode:$batterySaverEnabled"
+    }
+
+    fun isActivelyInUse(): Boolean {
+        if (attachedClients.get() > 0 || pipActive) return true
+        val p = pooledPlayer ?: return false
+        return backgroundAudioActive && runCatching { p.isPlaying || p.playWhenReady }.getOrDefault(false)
+    }
 
     /**
      * Pre-warms the singleton ExoPlayer asynchronously after the first Compose frame draws,
@@ -54,7 +101,7 @@ object CyosPlayerHolder {
         context: Context,
         mediaCodecSelector: MediaCodecSelector = NextRenderersFactory.createXvidAwareSelector(),
         extensionRendererMode: Int = DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON,
-        codecProfileKey: String = "AUTO_HW_PLUS:false:false:false",
+        codecProfileKey: String = buildCodecProfileKey("AUTO_HW_PLUS", false, false, false),
         batterySaverEnabled: Boolean = false
     ): Boolean {
         val appContext = context.applicationContext ?: context
@@ -96,13 +143,14 @@ object CyosPlayerHolder {
         ) {
             return PooledPlayerSession(
                 player = existingPlayer,
-                downmixAudioProcessor = sharedDownmixAudioProcessor,
+                downmixAudioProcessor = activeDownmixAudioProcessor,
                 isPooled = true
             )
         }
 
         releaseInternal()
 
+        val freshDownmixProcessor = Eac3DownmixAudioProcessor()
         val loadControl = CyosFastPlayer.createLoadControl(
             context = appContext,
             forceLowRamMode = forceLowRamMode,
@@ -111,7 +159,7 @@ object CyosPlayerHolder {
         )
         val renderersFactory = CyosFastPlayer.createRenderersFactory(
             context = appContext,
-            customAudioProcessors = arrayOf(sharedDownmixAudioProcessor),
+            customAudioProcessors = arrayOf(freshDownmixProcessor),
             mediaCodecSelector = mediaCodecSelector,
             extensionRendererMode = extensionRendererMode
         )
@@ -124,13 +172,15 @@ object CyosPlayerHolder {
             subtitlesEnabledByUser = subtitlesEnabledByUser
         )
 
+        activeDownmixAudioProcessor = freshDownmixProcessor
         pooledPlayer = newPlayer
         lastCodecKey = codecProfileKey
         lastNetworkMode = isNetworkStream
+        CyosMediaSessionController.attachToPlayer(appContext, newPlayer)
 
         return PooledPlayerSession(
             player = newPlayer,
-            downmixAudioProcessor = sharedDownmixAudioProcessor,
+            downmixAudioProcessor = freshDownmixProcessor,
             isPooled = true
         )
     }
@@ -199,13 +249,21 @@ object CyosPlayerHolder {
     @Suppress("DEPRECATION")
     @Synchronized
     fun trimOrReleaseOnMemoryPressure(context: Context, trimLevel: Int) {
+        // Never destroy the player while a player screen, mini-player, PiP, or background audio is actively attached.
+        if (isActivelyInUse()) return
         if (CyosFastPlayer.isLowRamDevice(context) ||
             trimLevel >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN ||
             trimLevel >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND ||
             trimLevel >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
         ) {
-            release()
+            releaseInternal()
         }
+    }
+
+    @Synchronized
+    fun releaseIfIdle() {
+        if (isActivelyInUse()) return
+        releaseInternal()
     }
 
     @Synchronized
@@ -213,6 +271,9 @@ object CyosPlayerHolder {
 
     @Synchronized
     fun release() {
+        attachedClients.set(0)
+        pipActive = false
+        backgroundAudioActive = false
         releaseInternal()
     }
 
@@ -221,6 +282,7 @@ object CyosPlayerHolder {
         lastPreparedPositionMs = 0L
         lastCodecKey = ""
         lastNetworkMode = false
+        CyosMediaSessionController.release()
         try {
             pooledPlayer?.release()
         } catch (_: Throwable) {

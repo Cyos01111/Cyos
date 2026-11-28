@@ -3,138 +3,217 @@ package com.cyosplay.player.util
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.HandlerThread
 import android.provider.MediaStore
+import android.view.PixelCopy
+import android.view.SurfaceView
+import androidx.media3.ui.PlayerView
 import com.cyosplay.player.data.model.VideoItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.coroutines.resume
 
 data class ScreenshotCaptureResult(
     val success: Boolean,
-    val displayPath: String,
-    val mediaStoreUri: Uri?,
-    val fileSizeBytes: Long
+    val fileName: String = "",
+    val savedUriString: String = "",
+    val message: String = "",
+    val displayPath: String = if (fileName.isNotBlank()) "Pictures/CyosPlay/$fileName" else ""
 )
 
 /**
- * Low-RAM frame capture engine for the Media3 video player.
- * Extracts the current video frame at [positionMs] with bounded resolution,
- * streams JPEG compression directly into a dedicated local directory via MediaStore API
- * (`Pictures/CyosPlay_Screenshots`), and immediately recycles the temporary Bitmap
- * inside a `finally` block so zero frame buffers remain in RAM.
+ * Captures real video frame screenshots and persists them into the public Pictures/CyosPlay
+ * gallery folder. Uses PixelCopy on the live SurfaceView when available on API 26+, falling
+ * back to MediaMetadataRetriever on Dispatchers.IO. Never writes a synthetic placeholder image
+ * when frame capture fails.
  */
 object VideoScreenshotCapture {
 
-    const val SCREENSHOT_RELATIVE_DIR = "Pictures/CyosPlay_Screenshots"
-    private const val MAX_CAPTURE_WIDTH = 1920
-    private const val MAX_CAPTURE_HEIGHT = 1080
-    private const val JPEG_QUALITY = 95
+    private const val MAX_SCREENSHOT_DIMENSION = 1920
 
+    /**
+     * Async screenshot capture that prefers live PixelCopy from [playerView]'s SurfaceView on API 26+,
+     * falling back to MediaMetadataRetriever on Dispatchers.IO, and writes JPEG output off the Main thread.
+     */
+    suspend fun captureFromSurfaceOrRetriever(
+        context: Context,
+        playerView: PlayerView?,
+        video: VideoItem,
+        positionMs: Long
+    ): ScreenshotCaptureResult {
+        val liveSurfaceBitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && playerView != null) {
+            captureViaPixelCopy(playerView)
+        } else {
+            null
+        }
+        return withContext(Dispatchers.IO) {
+            val bitmap = liveSurfaceBitmap ?: extractBoundedVideoFrame(context, video, positionMs)
+            if (bitmap == null) {
+                return@withContext ScreenshotCaptureResult(
+                    success = false,
+                    message = "Unable to capture frame from this video."
+                )
+            }
+            try {
+                saveBitmapToGallery(context, video, bitmap)
+            } finally {
+                runCatching {
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Synchronous capture helper kept for compatibility with non-UI/test callers; runs retriever +
+     * MediaStore JPEG save without fabricating a fake placeholder image on failure.
+     */
     fun captureCurrentFrameToMediaStore(
         context: Context,
         video: VideoItem,
         positionMs: Long
+    ): ScreenshotCaptureResult = captureAndSave(context, video, positionMs)
+
+    fun captureAndSave(
+        context: Context,
+        video: VideoItem,
+        positionMs: Long
     ): ScreenshotCaptureResult {
-        val appContext = context.applicationContext
-        val safeTitle = video.title
-            .replace(Regex("""[^a-zA-Z0-9._-]"""), "_")
-            .take(40)
-            .ifBlank { "CyosPlay_Frame" }
-        val timestampMs = System.currentTimeMillis()
-        val fileName = "${safeTitle}_${positionMs.coerceAtLeast(0L)}ms_${timestampMs}.jpg"
+        val bitmap = extractBoundedVideoFrame(context, video, positionMs)
+            ?: return ScreenshotCaptureResult(
+                success = false,
+                message = "Unable to capture frame from this video."
+            )
+        return try {
+            saveBitmapToGallery(context, video, bitmap)
+        } finally {
+            runCatching {
+                if (!bitmap.isRecycled) {
+                    bitmap.recycle()
+                }
+            }
+        }
+    }
 
-        var frameBitmap: Bitmap? = null
-        try {
-            frameBitmap = extractBoundedVideoFrame(appContext, video, positionMs)
-                ?: createMinimalFallbackFrame(video, positionMs)
+    private suspend fun captureViaPixelCopy(playerView: PlayerView): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
+        val surfaceView = playerView.videoSurfaceView as? SurfaceView ?: return null
+        val surface = surfaceView.holder?.surface ?: return null
+        if (!surface.isValid || surfaceView.width <= 0 || surfaceView.height <= 0) return null
 
-            // 1. Save via MediaStore API into dedicated local directory Pictures/CyosPlay_Screenshots
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(MediaStore.Images.Media.DATE_ADDED, timestampMs / 1000L)
-                put(MediaStore.Images.Media.DATE_MODIFIED, timestampMs / 1000L)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, SCREENSHOT_RELATIVE_DIR)
+        val targetWidth = surfaceView.width.coerceAtMost(MAX_SCREENSHOT_DIMENSION)
+        val scale = targetWidth.toFloat() / surfaceView.width.toFloat()
+        val targetHeight = (surfaceView.height * scale).toInt().coerceIn(1, MAX_SCREENSHOT_DIMENSION)
+        val bitmap = runCatching {
+            Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        }.getOrNull() ?: return null
+
+        val handlerThread = HandlerThread("CyosPixelCopy").apply { start() }
+        val handler = Handler(handlerThread.looper)
+
+        return try {
+            suspendCancellableCoroutine { cont ->
+                cont.invokeOnCancellation {
+                    runCatching { if (!bitmap.isRecycled) bitmap.recycle() }
+                    runCatching { handlerThread.quitSafely() }
+                }
+                try {
+                    PixelCopy.request(
+                        surfaceView,
+                        bitmap,
+                        { copyResult ->
+                            runCatching { handlerThread.quitSafely() }
+                            if (copyResult == PixelCopy.SUCCESS) {
+                                if (cont.isActive) cont.resume(bitmap)
+                            } else {
+                                runCatching { if (!bitmap.isRecycled) bitmap.recycle() }
+                                if (cont.isActive) cont.resume(null)
+                            }
+                        },
+                        handler
+                    )
+                } catch (_: Throwable) {
+                    runCatching { handlerThread.quitSafely() }
+                    runCatching { if (!bitmap.isRecycled) bitmap.recycle() }
+                    if (cont.isActive) cont.resume(null)
+                }
+            }
+        } catch (_: Throwable) {
+            runCatching { handlerThread.quitSafely() }
+            runCatching { if (!bitmap.isRecycled) bitmap.recycle() }
+            null
+        }
+    }
+
+    private fun saveBitmapToGallery(
+        context: Context,
+        video: VideoItem,
+        bitmap: Bitmap
+    ): ScreenshotCaptureResult {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val sanitizedTitle = video.title
+            .replace(Regex("[^A-Za-z0-9_\\-]"), "_")
+            .take(36)
+            .ifBlank { "CyosVideo" }
+        val fileName = "CyosPlay_${sanitizedTitle}_$timestamp.jpg"
+
+        return try {
+            val savedUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(
+                        MediaStore.Images.Media.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_PICTURES}/CyosPlay"
+                    )
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
-            }
-
-            val resolver = appContext.contentResolver
-            var insertedUri: Uri? = null
-            try {
-                insertedUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-                if (insertedUri != null) {
-                    val streamOpened = resolver.openOutputStream(insertedUri)?.use { out ->
-                        frameBitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-                        out.flush()
-                        true
-                    } ?: false
-
-                    if (streamOpened) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            val publishValues = ContentValues().apply {
-                                put(MediaStore.Images.Media.IS_PENDING, 0)
-                            }
-                            resolver.update(insertedUri, publishValues, null, null)
-                        }
-                        return ScreenshotCaptureResult(
-                            success = true,
-                            displayPath = "$SCREENSHOT_RELATIVE_DIR/$fileName",
-                            mediaStoreUri = insertedUri,
-                            fileSizeBytes = 64 * 1024L
-                        )
+                val resolver = context.contentResolver
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
                     }
-                }
-            } catch (_: Exception) {
-                // Fall back to direct Pictures/CyosPlay_Screenshots directory write when running in headless JVM/tests
-            }
-
-            // 2. Direct dedicated directory write fallback (ensures reliability on older APIs & Robolectric)
-            val dedicatedDir = try {
-                val extPictures = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-                val target = File(extPictures, "CyosPlay_Screenshots")
-                if (target.exists() || target.mkdirs()) {
-                    target
+                    values.clear()
+                    values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                    uri.toString()
                 } else {
-                    File(appContext.filesDir, SCREENSHOT_RELATIVE_DIR).apply { mkdirs() }
+                    saveToAppPicturesFallback(context, fileName, bitmap)
                 }
-            } catch (_: Exception) {
-                File(appContext.filesDir, SCREENSHOT_RELATIVE_DIR).apply { mkdirs() }
+            } else {
+                saveToAppPicturesFallback(context, fileName, bitmap)
             }
 
-            val outFile = File(dedicatedDir, fileName)
-            FileOutputStream(outFile).use { fos ->
-                frameBitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, fos)
-                fos.flush()
-            }
-
-            return ScreenshotCaptureResult(
-                success = outFile.exists() && outFile.length() > 0L,
-                displayPath = "$SCREENSHOT_RELATIVE_DIR/$fileName",
-                mediaStoreUri = insertedUri ?: Uri.fromFile(outFile),
-                fileSizeBytes = outFile.length()
+            ScreenshotCaptureResult(
+                success = savedUri.isNotBlank(),
+                fileName = fileName,
+                savedUriString = savedUri,
+                message = if (savedUri.isNotBlank()) {
+                    "Screenshot saved to Pictures/CyosPlay/$fileName"
+                } else {
+                    "Could not write screenshot file."
+                }
             )
-        } catch (_: Exception) {
-            return ScreenshotCaptureResult(
+        } catch (e: Throwable) {
+            ScreenshotCaptureResult(
                 success = false,
-                displayPath = "",
-                mediaStoreUri = null,
-                fileSizeBytes = 0L
+                fileName = fileName,
+                message = "Screenshot failed: ${e.localizedMessage ?: "Storage error"}"
             )
-        } finally {
-            // Immediately recycle bitmap so screenshot capture never retains heap memory
-            try {
-                if (frameBitmap != null && !frameBitmap.isRecycled) {
-                    frameBitmap.recycle()
-                }
-            } catch (_: Exception) {}
         }
     }
 
@@ -145,59 +224,71 @@ object VideoScreenshotCapture {
     ): Bitmap? {
         val retriever = MediaMetadataRetriever()
         return try {
-            val file = File(video.path)
-            if (file.exists() && file.isFile && file.length() > 0L) {
-                retriever.setDataSource(file.absolutePath)
-            } else {
-                retriever.setDataSource(context, video.uri)
+            var sourceSet = false
+            val parsedUri = video.uri
+            if (parsedUri.scheme == "content" || parsedUri.scheme == "file") {
+                sourceSet = runCatching {
+                    retriever.setDataSource(context, parsedUri)
+                    true
+                }.getOrDefault(false)
             }
+            if (!sourceSet && video.path.isNotBlank()) {
+                val file = File(video.path)
+                if (file.exists() && file.canRead()) {
+                    sourceSet = runCatching {
+                        retriever.setDataSource(file.absolutePath)
+                        true
+                    }.getOrDefault(false)
+                }
+            }
+            if (!sourceSet) return null
 
             val timeUs = positionMs.coerceAtLeast(0L) * 1000L
-            val targetW = video.width.coerceIn(320, MAX_CAPTURE_WIDTH)
-            val targetH = video.height.coerceIn(180, MAX_CAPTURE_HEIGHT)
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val rawFrame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
                 retriever.getScaledFrameAtTime(
                     timeUs,
-                    MediaMetadataRetriever.OPTION_CLOSEST,
-                    targetW,
-                    targetH
-                ) ?: retriever.getScaledFrameAtTime(
-                    timeUs,
                     MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    targetW,
-                    targetH
-                ) ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                    ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                    MAX_SCREENSHOT_DIMENSION,
+                    MAX_SCREENSHOT_DIMENSION
+                )
             } else {
-                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-                    ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } ?: return null
+
+            if (rawFrame.width <= MAX_SCREENSHOT_DIMENSION && rawFrame.height <= MAX_SCREENSHOT_DIMENSION) {
+                rawFrame
+            } else {
+                val scale = minOf(
+                    MAX_SCREENSHOT_DIMENSION.toFloat() / rawFrame.width.toFloat(),
+                    MAX_SCREENSHOT_DIMENSION.toFloat() / rawFrame.height.toFloat()
+                )
+                val scaledW = (rawFrame.width * scale).toInt().coerceAtLeast(1)
+                val scaledH = (rawFrame.height * scale).toInt().coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(rawFrame, scaledW, scaledH, true)
+                if (scaled !== rawFrame) rawFrame.recycle()
+                scaled
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             null
         } finally {
-            try {
-                retriever.release()
-            } catch (_: Exception) {}
+            runCatching { retriever.release() }
         }
     }
 
-    /**
-     * Ultra-compact RGB_565 fallback frame used when hardware decoder surface cannot be read
-     * by MediaMetadataRetriever (e.g. headless test containers or raw stream containers).
-     */
-    private fun createMinimalFallbackFrame(video: VideoItem, positionMs: Long): Bitmap {
-        val bmp = Bitmap.createBitmap(640, 360, Bitmap.Config.RGB_565)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(Color.rgb(12, 16, 28))
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 22f
+    private fun saveToAppPicturesFallback(
+        context: Context,
+        fileName: String,
+        bitmap: Bitmap
+    ): String {
+        val dir = File(
+            context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir,
+            "CyosPlay"
+        )
+        if (!dir.exists()) dir.mkdirs()
+        val outFile = File(dir, fileName)
+        FileOutputStream(outFile).use { fos ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 92, fos)
         }
-        canvas.drawText(video.title.take(36), 28f, 160f, paint)
-        paint.textSize = 16f
-        paint.color = Color.rgb(0, 229, 255)
-        canvas.drawText("${video.resolutionBadge} • ${Formatters.formatDuration(positionMs)}", 28f, 200f, paint)
-        return bmp
+        return Uri.fromFile(outFile).toString()
     }
 }
