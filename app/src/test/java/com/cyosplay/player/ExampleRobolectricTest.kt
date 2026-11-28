@@ -6048,4 +6048,53 @@ class ExampleRobolectricTest {
         assertEquals("CyosPlay 1.08rv9", context.getString(R.string.about_us_description))
         assertTrue(com.cyos.player.CyosSmartDataSourceFactory.USER_AGENT.contains("1.08rv9"))
     }
+
+    @Test
+    fun githubPrivacy_hidesAllKeystoresSecretsEncryptedBlobsAndExportedApks() {
+        val candidateRoots = listOf(File(".."), File("."))
+        val repoRoot = candidateRoots.firstOrNull { File(it, ".gitignore").isFile }
+            ?: throw AssertionError("Unable to locate repository root containing .gitignore")
+
+        val gitIgnoreLines = File(repoRoot, ".gitignore").readLines().map { it.trim() }
+        listOf(
+            ".env",
+            "*.keystore",
+            "*.keystore.*",
+            "debug.keystore",
+            "debug.keystore.base64",
+            "*.jks",
+            "*.p12",
+            "*.pem",
+            "*.key",
+            "*.enc",
+            "*.gpg",
+            "*.cyosvault",
+            "export/",
+            "*.apk",
+            "*.zip",
+            "*.sha256"
+        ).forEach { requiredRule ->
+            assertTrue(".gitignore must hide $requiredRule from GitHub", requiredRule in gitIgnoreLines)
+        }
+        assertFalse(".gitignore must not un-ignore debug.keystore", "!debug.keystore" in gitIgnoreLines)
+        assertFalse(".gitignore must not un-ignore debug.keystore.base64", "!debug.keystore.base64" in gitIgnoreLines)
+
+        val envExampleLines = File(repoRoot, ".env.example").readLines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+        assertTrue(".env.example must contain signing key placeholders", envExampleLines.isNotEmpty())
+        envExampleLines.forEach { entry ->
+            val key = entry.substringBefore("=").trim()
+            val value = entry.substringAfter("=", "").trim()
+            assertFalse(".env.example must not define retired build envelope password", key == "CYOSPLAY_BUILD_CODE_" + "PASSWORD")
+            assertEquals(".env.example key '$key' must remain empty", "", value)
+        }
+
+        val verifyGradleText = File(repoRoot, "gradle/verify-release-security.gradle.kts").readText()
+        assertTrue("verifyGitHubPrivacy task must be registered", verifyGradleText.contains("verifyGitHubPrivacy"))
+        assertFalse("Encrypted build envelope encryption must be removed", verifyGradleText.contains("fun encryptEnvelope("))
+        assertFalse("Encrypted build envelope decryption must be removed", verifyGradleText.contains("fun decryptEnvelope("))
+        assertTrue("Pre-commit leak guard script must exist", File(repoRoot, ".githooks/pre-commit").isFile)
+    }
 }
+

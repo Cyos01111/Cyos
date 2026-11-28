@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Building and verifying CyosPlay 1.08rv9 release APK (assembleRelease + verifyReleaseSignatureAndEncryption)..."
-gradle :app:assembleRelease
+echo "Verifying GitHub privacy guard and building CyosPlay 1.08rv9 release APK..."
+gradle :app:verifyGitHubPrivacy :app:assembleRelease
 
 EXPORTED_APK="export/CyosPlay-1.08rv9-release.apk"
 EXPORTED_SHA256="export/CyosPlay-1.08rv9-release.apk.sha256"
